@@ -9,6 +9,7 @@ import { issueSig, loadBaseline, saveBaseline } from './delta.js';
 import { scanGotchas } from './gotchas.js';
 import { gameLogReport } from './logcheck.js';
 import { createLspEngine } from './lsp-legacy.js';
+import { createInProcEngine } from './engine/inproc.js';
 import { loadCommandTree, loadCachedVersions, cachedCommandVersions, renderPath, renderAll } from './syntax.js';
 import type { BaselineEntry, CheckLog, CompletionItemDTO, GameLogReport, GotchaIssue, RawDiagnostic, ReportIssue, SyntaxResult } from './types.js';
 import type { CheckEngine } from './engine/types.js';
@@ -32,7 +33,7 @@ export interface CheckOptions {
   version: string;
   only?: string;
   mode?: 'open' | 'analyze';
-  /** Default 'lsp' until the in-process engine lands; M3 flips to 'inproc'. */
+  /** Engine to use. Default 'inproc'; 'lsp' is the legacy subprocess path (parity reference). */
   engine?: EngineKind;
   ignore?: { useIgnore: boolean; extra: string[] };
   delta?: boolean;
@@ -86,11 +87,7 @@ interface McmetaVersion { id: string; name?: string; type?: string; data_pack_ve
 
 // ---- engine selection ---------------------------------------------------------
 function makeEngine(kind?: EngineKind): CheckEngine {
-  if (kind === 'inproc') {
-    // M3 replaces this with a real import of engine/inproc.ts.
-    throw new DpkitError('[check] 进程内引擎尚未实现 (M3); 请用 --engine=lsp', 2);
-  }
-  return createLspEngine();
+  return (kind ?? 'inproc') === 'inproc' ? createInProcEngine() : createLspEngine();
 }
 
 // ---- check --------------------------------------------------------------------
@@ -138,7 +135,7 @@ function assembleReport(
   const logCheck = opts.noLog !== true;
   const delta = opts.delta ?? false;
   const baselineFile = opts.baselineFile ?? BASELINE_FILE;
-  const engineKind: EngineKind = opts.engine ?? 'lsp';
+  const engineKind: EngineKind = opts.engine ?? 'inproc';
   const dataDir = join(opts.datapack, 'data');
 
   let errorCount = 0, warnCount = 0, ignoredCount = 0, internalErr = 0, issueFiles = 0;

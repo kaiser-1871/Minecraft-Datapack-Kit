@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"const j=require\\(process.env.LOCALAPPDATA+'/spyglassmc-nodejs/Cache/http/index.json'\\); console.log\\(JSON.stringify\\(j,null,1\\)\\)\")"
+    ]
+  }
+}

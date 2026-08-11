@@ -1,0 +1,231 @@
+{
+  "datapack": "D:\\Minecraft\\.minecraft\\versions\\26.2\\saves\\111\\datapacks\\pvp",
+  "version": "26.2",
+  "files": {
+    "battle/advancement/royal_guard/enemy_mob_trigger.json": {
+      "sig": ""
+    },
+    "battle/advancement/royal_guard/enemy_player_trigger.json": {
+      "sig": ""
+    },
+    "battle/advancement/snowman/break_stealth_trigger.json": {
+      "sig": "2:Cannot find tag/damage_type “minecraft:is_magic” (rule: undeclaredSymbol)"
+    },
+    "battle/advancement/snowman/eat_devour_trigger.json": {
+      "sig": ""
+    },
+    "battle/advancement/snowman/eat_ice_shard_trigger.json": {
+      "sig": ""
+    },
+    "battle/advancement/snowman/eat_snow_lotus_trigger.json": {
+      "sig": ""
+    },
+    "battle/advancement/snowman/eat_snow_sword_trigger.json": {
+      "sig": ""
+    },
+    "battle/advancement/snowman/frost_attack_trigger.json": {
+      "sig": "2:Cannot find tag/damage_type “minecraft:is_magic” (rule: undeclaredSymbol)"
+    },
+    "battle/function/class_guard.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/class_guard_force.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/royal_guard/on_enemy_hit.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/royal_guard/passive.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/royal_guard/reflect.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/royal_guard/reflect_setup.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/break_out.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/break_out_fallback.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/break_out_start.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/cleanup_drops.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/cleanup_strays.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/clear_buffs.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/clear_debuffs.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/cold_front_start.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/cold_front_tick.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/cold_range.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/devour_miss.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/devour_pounce.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/devour_range.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/devour_start.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/drop_devour.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/drop_lotus.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/drop_shard.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/drop_sword.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/eat_snowball.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/frost_apply.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/frost_hit.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/frost_hit_fallback.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/frost_proc.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/give_devour.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/give_ice_shard.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/give_snow_lotus.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/give_snow_sword.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/init_items.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/lotus_apply.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/lunge_tick.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/on_break_attack.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/on_eat_devour.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/on_eat_ice_shard.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/on_eat_snow_lotus.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/on_eat_snow_sword.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/on_frost_attack.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/passive.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/replenish_ice_shard.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/replenish_snow_sword.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/shards_place.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/shards_range.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/shards_shatter.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/shards_start.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/shards_tick.mcfunction": {
+      "sig": ""
+    },
+    "battle/function/snowman/snow_buff.mcfunction": {
+      "sig": ""
+    },
+    "battle/tags/block/ice_shards.json": {
+      "sig": ""
+    },
+    "battle/tags/entity_type/enemies.json": {
+      "sig": ""
+    },
+    "map/function/load.mcfunction": {
+      "sig": ""
+    },
+    "map/function/main.mcfunction": {
+      "sig": ""
+    },
+    "map/function/teleport/check.mcfunction": {
+      "sig": ""
+    },
+    "map/function/teleport/pad_01.mcfunction": {
+      "sig": ""
+    },
+    "map/function/teleport/pad_02.mcfunction": {
+      "sig": ""
+    },
+    "map/function/teleport/pad_03.mcfunction": {
+      "sig": ""
+    },
+    "map/function/teleport/pad_04.mcfunction": {
+      "sig": ""
+    },
+    "map/function/teleport/pad_05.mcfunction": {
+      "sig": ""
+    },
+    "map/function/teleport/pad_06.mcfunction": {
+      "sig": ""
+    },
+    "map/function/teleport/pad_07.mcfunction": {
+      "sig": ""
+    },
+    "map/function/teleport/pad_08.mcfunction": {
+      "sig": ""
+    },
+    "minecraft/tags/damage_type/bypasses_cooldown.json": {
+      "sig": ""
+    },
+    "minecraft/tags/function/load.json": {
+      "sig": ""
+    },
+    "minecraft/tags/function/tick.json": {
+      "sig": ""
+    }
+  }
+}

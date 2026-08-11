@@ -1,0 +1,29 @@
+{
+  "name": "dpkit",
+  "version": "1.0.0",
+  "description": "Datapack Kit — check a datapack with the Spyglass/DHP engine and teach its exact per-version command syntax.",
+  "type": "module",
+  "main": "dist/api.js",
+  "types": "dist/api.d.ts",
+  "bin": {
+    "dpkit": "dpkit.mjs"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "test": "node --test tests/",
+    "mcp": "node dist/mcp.js",
+    "parity": "node tests/parity.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@spyglassmc/language-server": "^0.4.66"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}

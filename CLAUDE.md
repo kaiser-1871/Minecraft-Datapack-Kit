@@ -3,6 +3,15 @@
 本目录工具用于检查存档「丽格乔娅史诗」的 `pvp` 数据包(位于 `../datapacks/pvp`)。
 游戏版本固定 **26.2**(data_pack_version 107)。引擎自动识别会偏新,所以一律用 `--version=26.2`。
 
+**架构(2026-08 重构后)**:源码是 TypeScript,在 `src/`(cli / api / engine / lsp-legacy / mcp /
+syntax / 纯逻辑模块),编译到 `dist/`。根 `dpkit.mjs` 是 shim,`node dpkit.mjs` 用法不变。
+**改源码后必须 `npm run build` 才生效**。默认用进程内引擎(`@spyglassmc/core` 的 `Project` 直驱,
+不 spawn 子进程),`--engine=lsp` 保留旧 LSP 子进程路径做对拍。新增 MCP server(`npm run mcp`,
+工具 check_datapack/query_syntax/complete_at/list_versions/scan_gotchas)与类型化 API(`dist/api.d.ts`)。
+回归测试:`npm test`(21 个);正确性闸门:`npm run parity`(inproc vs LSP 逐文件 issueSig 相等)。
+进程内引擎的关键坑:projectRoot 必须过 `core.normalizeUri`(盘符小写),否则 `analyzeProject`
+大小写敏感匹配不到文件、分析 0 文件。
+
 ## 写命令之前:先查 ground-truth 语法(重要)
 
 **不要凭记忆臆测某条命令/参数是否存在于 26.2,也不要猜枚举值。** 先用下面的命令拿到

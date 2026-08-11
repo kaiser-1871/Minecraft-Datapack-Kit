@@ -47,8 +47,8 @@ class LspSession {
   private opened = new Set<string>(); // normUri
   readonly serverLog: string[] = [];
   private readyFlag = false;
-  private readyWaiters: (() => void)[] = [];
-  private settleWaiters: (() => void)[] = [];
+  private readyWaiters: { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }[] = [];
+  private settleWaiters: { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }[] = [];
   private closed = false;
 
   /** Echo for server log lines, already prefixed ([server] / [server-msg]). */
@@ -140,16 +140,26 @@ class LspSession {
       case '$/progress': {
         if (msg.params.token === 'initialize' && msg.params.value?.kind === 'end') {
           this.readyFlag = true;
-          for (const w of this.readyWaiters.splice(0)) w();
+          this.#readyAll(true, new Error());
         }
         break;
       }
     }
   }
 
+  #readyAll(ok: boolean, err: Error): void {
+    const ws = this.readyWaiters.splice(0);
+    for (const w of ws) { clearTimeout(w.timer); ok ? w.resolve() : w.reject(err); }
+  }
+
+  #settleAll(ok: boolean, err: Error): void {
+    const ws = this.settleWaiters.splice(0);
+    for (const w of ws) { clearTimeout(w.timer); ok ? w.resolve() : w.reject(err); }
+  }
+
   #checkSettled(): void {
     if (this.opened.size > 0 && this.diagnostics.size + this.failed.size >= this.opened.size) {
-      for (const w of this.settleWaiters.splice(0)) w();
+      this.#settleAll(true, new Error());
     }
   }
 
@@ -157,8 +167,10 @@ class LspSession {
   waitReady(timeoutMs: number): Promise<void> {
     if (this.readyFlag) return Promise.resolve();
     return new Promise((resolve, reject) => {
-      this.readyWaiters.push(resolve);
-      setTimeout(() => reject(new Error(`project never became ready within ${timeoutMs}ms. Server log:\n${this.serverLog.join('\n')}`)), timeoutMs);
+      const timer = setTimeout(() => {
+        this.#readyAll(false, new Error(`project never became ready within ${timeoutMs}ms. Server log:\n${this.serverLog.join('\n')}`));
+      }, timeoutMs);
+      this.readyWaiters.push({ resolve, reject, timer });
     });
   }
 
@@ -166,8 +178,10 @@ class LspSession {
   waitSettled(timeoutMs: number): Promise<void> {
     if (this.opened.size > 0 && this.diagnostics.size + this.failed.size >= this.opened.size) return Promise.resolve();
     return new Promise((resolve, reject) => {
-      this.settleWaiters.push(resolve);
-      setTimeout(() => reject(new Error(`timed out waiting for diagnostics (received ${this.diagnostics.size}/${this.opened.size}). Server log:\n${this.serverLog.join('\n')}`)), timeoutMs);
+      const timer = setTimeout(() => {
+        this.#settleAll(false, new Error(`timed out waiting for diagnostics (received ${this.diagnostics.size}/${this.opened.size}). Server log:\n${this.serverLog.join('\n')}`));
+      }, timeoutMs);
+      this.settleWaiters.push({ resolve, reject, timer });
     });
   }
 
@@ -191,12 +205,18 @@ class LspSession {
   #rejectAll(e: Error): void {
     for (const entry of this.pending.values()) entry.reject(e);
     this.pending.clear();
-    for (const w of this.settleWaiters.splice(0)) w(); // don't hang the settle wait on a dead server
+    this.#settleAll(false, e); // don't hang the settle wait on a dead server
+    this.#readyAll(false, e);
   }
 
   close(): void {
     this.closed = true;
     this.child.kill();
+    // Release the child's stdio pipes so the parent process can exit naturally.
+    this.child.stdin.destroy();
+    this.child.stdout.destroy();
+    this.child.stderr.destroy();
+    this.child.unref();
   }
 }
 

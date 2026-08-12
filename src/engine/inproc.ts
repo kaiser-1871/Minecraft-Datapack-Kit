@@ -129,7 +129,7 @@ export function createInProcEngine(): CheckEngine {
         await service.project.ready({ projectRootsWatcher: watcher });
         // Mirrors the LSP onCompletion handler: open the file client-side, force a
         // bind+check, then ask the Service for completions at the offset.
-        await service.project.onDidOpen(nUri, languageId, 1, readFileSync(file, 'utf8'));
+        await service.project.onDidOpen(nUri, languageId, 1, opts.text ?? readFileSync(file, 'utf8'));
         const dand = await service.project.ensureClientManagedChecked(nUri);
         if (!dand) return [];
         const offset = dand.doc.offsetAt({ line: line - 1, character: column - 1 });

@@ -7,14 +7,27 @@
 //
 // Port of the original syntax.mjs with TypeScript annotations.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-
-export const DEFAULT_VERSION = '26.2';
+import { DEFAULT_VERSION } from './config.js';
 
 // ---- cache access -----------------------------------------------------------
 function cacheDir(): string {
   return join(process.env.LOCALAPPDATA ?? '', 'spyglassmc-nodejs', 'Cache');
+}
+
+// Memoized cache index. Keyed by index.json mtime so the engine's cache refresh during a
+// check invalidates it (an index read before the refresh would otherwise serve stale entries).
+let indexMemo: { mtime: number; index: unknown } | null = null;
+function readIndex(): unknown {
+  const indexPath = join(cacheDir(), 'http', 'index.json');
+  let mtime = 0;
+  try { mtime = statSync(indexPath).mtimeMs; } catch { /* no index yet */ }
+  if (indexMemo?.mtime === mtime) return indexMemo.index;
+  let index: unknown = null;
+  try { index = JSON.parse(readFileSync(indexPath, 'utf8')); } catch { /* unreadable */ }
+  indexMemo = { mtime, index };
+  return index;
 }
 
 /**
@@ -24,26 +37,41 @@ function cacheDir(): string {
  */
 export function loadCachedVersions(): unknown[] | null {
   const base = cacheDir();
-  const indexPath = join(base, 'http', 'index.json');
-  let index;
-  try { index = JSON.parse(readFileSync(indexPath, 'utf8')); } catch { return null; }
-  const rec = index.index?.['https://api.spyglassmc.com/mcje/versions']?.[''];
+  const index = readIndex() as { index?: Record<string, unknown> } | null;
+  const rec = (index?.index as Record<string, { ''?: { sha1?: string } }> | undefined)?.['https://api.spyglassmc.com/mcje/versions']?.[''];
   if (!rec) return null;
   try {
-    const objPath = join(base, 'http', 'objects', rec.sha1.slice(0, 2), rec.sha1);
+    const objPath = join(base, 'http', 'objects', rec.sha1!.slice(0, 2), rec.sha1!);
     const d = JSON.parse(readFileSync(objPath, 'utf8'));
     return Array.isArray(d) ? d : null;
   } catch { return null; }
 }
 
+/**
+ * Resolve a version specifier to a concrete version id we have data for.
+ * 'auto' / 'latest release' / 'latest snapshot' → the latest release (or, failing
+ * that, the newest entry) in the local cache; a concrete id passes through unchanged.
+ * Throws a helpful error when nothing is cached yet.
+ */
+export function resolveConcreteVersion(version: string): string {
+  if (!['auto', 'latest release', 'latest snapshot'].includes(version)) return version;
+  const cached = loadCachedVersions();
+  if (Array.isArray(cached) && cached.length) {
+    const entries = cached as Array<{ type?: string; id?: string }>;
+    const release = entries.find(v => v.type === 'release');
+    const pick = release ?? entries[0];
+    if (pick?.id) return pick.id;
+  }
+  throw new Error(
+    `[dpkit] 版本 '${version}' 需要解析成具体版本,但本地还没有版本缓存。请先在线跑一次 node dpkit.mjs 下载数据,或用 --version=<具体版本> 指定。`,
+  );
+}
+
 /** Set of version ids whose command data is already cached locally. */
 export function cachedCommandVersions(): Set<string> {
-  const base = cacheDir();
-  const indexPath = join(base, 'http', 'index.json');
-  let index;
-  try { index = JSON.parse(readFileSync(indexPath, 'utf8')); } catch { return new Set(); }
+  const index = readIndex() as { index?: Record<string, unknown> } | null;
   const out = new Set<string>();
-  for (const k of Object.keys(index.index ?? {})) {
+  for (const k of Object.keys(index?.index ?? {})) {
     const m = k.match(/\/mcje\/versions\/([^/]+)\/commands$/);
     if (m) out.add(decodeURIComponent(m[1]));
   }
@@ -55,18 +83,13 @@ export function cachedCommandVersions(): Set<string> {
  * Returns the root node { type:'root', children } or throws a helpful Error.
  */
 export function loadCommandTree(version: string = DEFAULT_VERSION): CommandNode {
+  const concrete = resolveConcreteVersion(version);
   const base = cacheDir();
-  const indexPath = join(base, 'http', 'index.json');
-  let index;
-  try {
-    index = JSON.parse(readFileSync(indexPath, 'utf8'));
-  } catch (err) {
-    throw new Error(`无法读取缓存索引 ${indexPath} (${(err as Error).message})。请先跑一次 node dpkit.mjs 下载版本数据。`);
-  }
-  const url = `https://api.spyglassmc.com/mcje/versions/${version}/commands`;
-  const rec = index.index?.[url]?.[''];
-  if (!rec) {
-    throw new Error(`缓存里没有版本 ${version} 的命令数据 (${url})。请先跑一次 node dpkit.mjs --version=${version} 下载。`);
+  const index = readIndex() as { index?: Record<string, { '': { sha1?: string } }> } | null;
+  const url = `https://api.spyglassmc.com/mcje/versions/${concrete}/commands`;
+  const rec = index?.index?.[url]?.[''];
+  if (!rec?.sha1) {
+    throw new Error(`缓存里没有版本 ${concrete} 的命令数据 (${url})。请先跑一次 node dpkit.mjs --version=${concrete} 下载。`);
   }
   const objPath = join(base, 'http', 'objects', rec.sha1.slice(0, 2), rec.sha1);
   return JSON.parse(readFileSync(objPath, 'utf8'));

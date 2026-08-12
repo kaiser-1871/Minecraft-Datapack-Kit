@@ -28,6 +28,8 @@ export interface EngineCompleteOptions {
   rel: string; // data/-relative path
   line: number; // 1-based
   column: number; // 1-based
+  /** Inline document text to complete instead of reading `file` from disk (file may not exist). */
+  text?: string;
   verbose?: boolean;
   onLog?: (msg: string) => void;
 }

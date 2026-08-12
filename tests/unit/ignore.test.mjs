@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePattern, createIgnoreFilter } from '../../dist/ignore.js';
+import { parsePattern, createIgnoreFilter, isVanillaRegistryMiss } from '../../dist/ignore.js';
 
 test('parsePattern: substring vs /regex/', () => {
   assert.equal(typeof parsePattern('foo'), 'string');
@@ -31,4 +31,28 @@ test('comma-separated extra patterns', () => {
   const f = createIgnoreFilter({ useIgnore: false, extra: ['a,b'] });
   assert.ok(f('a'));
   assert.ok(f('b'));
+});
+
+// ---- isVanillaRegistryMiss (data-driven vanilla-registry false-positive filter) ----
+
+const REGS = { attribute: ['attack_speed', 'movement_speed'], mob_effect: ['speed', 'slowness'] };
+
+test('filters a vanilla ID that IS in the registry (trailing rule suffix tolerated)', () => {
+  assert.ok(isVanillaRegistryMiss('Cannot find attribute “minecraft:attack_speed” (rule: undeclaredSymbol)', REGS));
+  assert.ok(isVanillaRegistryMiss('Cannot find attribute "minecraft:attack_speed"', REGS)); // ASCII quote form
+});
+
+test('does not filter an ID that is NOT in the registry (genuine typo/removed)', () => {
+  assert.ok(!isVanillaRegistryMiss('Cannot find mob_effect “minecraft:knockback” (rule: undeclaredSymbol)', REGS));
+  assert.ok(!isVanillaRegistryMiss('Cannot find attribute “minecraft:attack_speeed”', REGS));
+});
+
+test('does not filter custom namespaces or tags', () => {
+  assert.ok(!isVanillaRegistryMiss('Cannot find damage_type “test:my_type”', REGS)); // category not a key either
+  assert.ok(!isVanillaRegistryMiss('Cannot find damage_type “minecraft:is_magic”', REGS));
+});
+
+test('does not filter categories we have no registry data for', () => {
+  assert.ok(!isVanillaRegistryMiss('Cannot find function “test:no_such_func”', REGS));
+  assert.ok(!isVanillaRegistryMiss('Unknown key “Foo”', REGS));
 });

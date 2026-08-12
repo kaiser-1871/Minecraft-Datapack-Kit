@@ -3,8 +3,12 @@
 // MCP stdio transport is NEWLINE-delimited JSON (unlike LSP's Content-Length framing).
 // Usage: npm run build && node tests/mcp-smoke.mjs [tool]
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
 const MCP = process.env.DPKIT_MCP ?? 'dist/mcp.js';
+// Self-contained fixture datapack, so the smoke test runs on any machine (no external datapack needed).
+const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'pack');
 const child = spawn(process.execPath, [MCP], { stdio: ['pipe', 'pipe', 'pipe'] });
 let buf = Buffer.alloc(0);
 let nextId = 1;
@@ -77,16 +81,17 @@ try {
   const which = process.argv[2];
   const targets = which
     ? [which]
-    : ['query_syntax', 'list_versions', 'scan_gotchas', 'complete_at', 'check_datapack'];
+    : ['query_syntax', 'list_versions', 'scan_gotchas', 'list_registry', 'complete_at', 'check_datapack'];
 
   for (const name of targets) {
     if (!names.includes(name)) { console.log(`[mcp] unknown tool ${name}`); process.exitCode = 1; continue; }
     const args = {
       query_syntax: { path: 'execute on', version: '26.2' },
       list_versions: { configured: '26.2' },
-      scan_gotchas: { files: 'battle/function/snowman/*.mcfunction' },
-      complete_at: { file: 'battle/function/snowman/break_out_start.mcfunction', line: 7, column: 26 },
-      check_datapack: {},
+      scan_gotchas: { datapack: FIXTURE, files: 'test/function/gotcha.mcfunction' },
+      list_registry: { registry: 'mob_effect', version: '26.2' },
+      complete_at: { datapack: FIXTURE, file: 'test/function/gotcha.mcfunction', line: 1, column: 24 },
+      check_datapack: { datapack: FIXTURE },
     }[name];
     await call(name, args);
   }

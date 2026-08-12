@@ -1,11 +1,15 @@
 // parity.mjs — compare the in-process engine against the LSP subprocess engine on the
 // same datapack. This is the correctness gate for the M3 refactor: per-file issue
 // signatures (and the full report) must match exactly. Run with `npm run parity`.
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { checkDatapack, DpkitError } from '../dist/api.js';
-import { detectDefaultDatapack } from '../dist/datapack-discovery.js';
 
+// Default to the self-contained fixture so parity runs on any machine; point
+// DPKIT_PARITY_DATAPACK at your own pack to gate against a bigger surface.
+const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'pack');
 const version = process.env.DPKIT_PARITY_VERSION ?? '26.2';
-const datapack = process.env.DPKIT_PARITY_DATAPACK ?? detectDefaultDatapack(version);
+const datapack = process.env.DPKIT_PARITY_DATAPACK ?? FIXTURE;
 
 const started = Date.now();
 let lsp, inproc;

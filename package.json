@@ -20,7 +20,13 @@
   "license": "ISC",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@spyglassmc/language-server": "^0.4.66"
+    "@spyglassmc/core": "^0.4.53",
+    "@spyglassmc/java-edition": "^0.3.66",
+    "@spyglassmc/language-server": "^0.4.66",
+    "@spyglassmc/locales": "^0.3.27",
+    "@spyglassmc/mcdoc": "^0.3.57",
+    "env-paths": "^2.2.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

@@ -34,3 +34,20 @@ test('baseline load/save round-trip + key mismatch', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('baseline saved under resolved version is found, old raw-specifier key migrates', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dpkit-delta-'));
+  try {
+    // resolved-version key is the primary lookup
+    const fileA = join(dir, 'a.json');
+    saveBaseline(fileA, { datapack: 'DP', version: '26.2', files: { 'a.mcfunction': { sig: '1:x' } } });
+    assert.deepEqual(loadBaseline(fileA, 'DP', '26.2', 'auto'), { 'a.mcfunction': { sig: '1:x' } });
+
+    // an old baseline keyed on the raw 'auto' specifier still applies (fallback)
+    const fileB = join(dir, 'b.json');
+    saveBaseline(fileB, { datapack: 'DP', version: 'auto', files: { 'b.mcfunction': { sig: '2:y' } } });
+    assert.deepEqual(loadBaseline(fileB, 'DP', '26.2', 'auto'), { 'b.mcfunction': { sig: '2:y' } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

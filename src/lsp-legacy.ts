@@ -302,7 +302,7 @@ export function createLspEngine(): CheckEngine {
         const uri = normUri(pathToFileURL(file).href);
         session.markOpened(uri);
         const languageId = file.endsWith('.mcfunction') ? 'mcfunction' : 'json';
-        session.notify('textDocument/didOpen', { textDocument: { uri, languageId, version: 1, text: readFileSync(file, 'utf8') } });
+        session.notify('textDocument/didOpen', { textDocument: { uri, languageId, version: 1, text: opts.text ?? readFileSync(file, 'utf8') } });
         // Force the engine to parse + bind the file (completions need it checked first), then
         // wait for its diagnostics to land so a big project doesn't return empty lists.
         session.request('textDocument/documentSymbol', { textDocument: { uri } }).catch(() => {});

@@ -1,30 +1,52 @@
 // delta.ts — baseline load/save and the stable per-file issue signature used by --delta.
+//
+// The baseline file holds MULTIPLE datapacks: one entry per "datapack@@version" key, so
+// checking different packs doesn't clobber each other's history. Legacy single-entry
+// files (top-level datapack/version/files) are still read and migrated on save.
 import { readFileSync, writeFileSync } from 'node:fs';
 import type { BaselineEntry, RawDiagnostic } from './types.js';
 
-/**
- * Stable signature of a file's non-ignored issues, for --delta comparison.
- * Sorted by position then rendered as "severity:message" lines.
- */
+/** Stable signature of a file's non-ignored issues, for --delta comparison. */
 export function issueSig(ds: ReadonlyArray<RawDiagnostic>): string {
   return [...ds]
     .sort((a, b) => (a.range.start.line - b.range.start.line) || (a.range.start.character - b.range.start.character))
     .map(d => `${d.severity}:${d.message}`).join('\n');
 }
 
-/** Load a baseline that matches the given datapack + version, else an empty record. */
+const key = (datapack: string, version: string): string => `${datapack}@@${version}`;
+
+interface BaselineStore {
+  schema?: number;
+  baselines?: Record<string, { files?: Record<string, BaselineEntry> }>;
+  // legacy single-entry shape
+  datapack?: string;
+  version?: string;
+  files?: Record<string, BaselineEntry>;
+}
+
+/**
+ * Load a baseline that matches the given datapack + version, else an empty record.
+ * `fallbackVersion` is the raw requested version (e.g. 'auto') — used to migrate baselines
+ * that were previously keyed on the raw specifier instead of the resolved concrete version.
+ */
 export function loadBaseline(
   baselineFile: string,
   datapack: string,
   version: string,
+  fallbackVersion?: string,
 ): Record<string, BaselineEntry> {
   try {
-    const b = JSON.parse(readFileSync(baselineFile, 'utf8')) as {
-      datapack?: string;
-      version?: string;
-      files?: Record<string, BaselineEntry>;
-    };
-    if (b.datapack === datapack && b.version === version) return b.files ?? {};
+    const b = JSON.parse(readFileSync(baselineFile, 'utf8')) as BaselineStore;
+    const entry = b.baselines?.[key(datapack, version)];
+    if (entry?.files) return entry.files;
+    // legacy single-entry file written before multi-baseline support
+    if (b.datapack === datapack && b.version === version && b.files) return b.files;
+    // migration: an old baseline keyed on the raw specifier still applies
+    if (fallbackVersion && fallbackVersion !== version) {
+      const legacy = b.baselines?.[key(datapack, fallbackVersion)];
+      if (legacy?.files) return legacy.files;
+      if (b.datapack === datapack && b.version === fallbackVersion && b.files) return b.files;
+    }
   } catch { /* no usable baseline yet */ }
   return {};
 }
@@ -33,5 +55,14 @@ export function saveBaseline(
   baselineFile: string,
   baseline: { datapack: string; version: string; files: Record<string, BaselineEntry> },
 ): void {
-  writeFileSync(baselineFile, JSON.stringify(baseline, null, 2));
+  let store: BaselineStore = { schema: 2 };
+  try { store = JSON.parse(readFileSync(baselineFile, 'utf8')) as BaselineStore; } catch { /* start fresh */ }
+  store.schema = 2;
+  store.baselines ??= {};
+  store.baselines[key(baseline.datapack, baseline.version)] = { files: baseline.files };
+  // migrate: drop legacy top-level fields now that we're in multi-entry form
+  delete store.datapack;
+  delete store.version;
+  delete store.files;
+  writeFileSync(baselineFile, JSON.stringify(store, null, 2));
 }

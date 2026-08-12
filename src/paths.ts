@@ -11,6 +11,3 @@ export const SERVER = join(ROOT_DIR, 'node_modules', '@spyglassmc', 'language-se
 
 /** Baseline file for --delta. */
 export const BASELINE_FILE = join(ROOT_DIR, '.dpkit-baseline.json');
-
-/** Legacy relative default datapack (breaks when the tool moves). */
-export const LEGACY_DEFAULT_DATAPACK = join(ROOT_DIR, '..', 'datapacks', 'pvp');

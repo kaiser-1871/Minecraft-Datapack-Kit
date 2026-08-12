@@ -1,10 +1,10 @@
 // collect.ts — walk a datapack's data/ directory for checkable files and apply the
-// --files glob filter. Paths are made relative to data/ so --files=battle/... reads
+// --files glob filter. Paths are made relative to data/ so --files=<ns>/... reads
 // naturally (matches README).
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const FILES_EMPTY_HINT = '[check] --files is matched relative to data/ — try e.g. battle/function/*.mcfunction';
+export const FILES_EMPTY_HINT = '[check] --files is matched relative to data/ — try e.g. test/function/*.mcfunction';
 
 /** Normalize an absolute file path to a data/-relative path with forward slashes. */
 export function toRel(filePath: string, dataDir: string): string {

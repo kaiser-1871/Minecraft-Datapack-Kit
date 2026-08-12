@@ -1,0 +1,8 @@
+{
+  "datapack": "C:/Users/you/AppData/Roaming/.minecraft/versions/1.21.4/saves/MyWorld/datapacks/MyPack",
+  "version": "1.21.4",
+  "minecraftRoot": "C:/Users/you/AppData/Roaming/.minecraft",
+  "ignore": [],
+  "gotchas": true,
+  "logcheck": true
+}

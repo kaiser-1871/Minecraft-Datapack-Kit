@@ -1,5 +1,7 @@
 node_modules/
 dist/
+.backup/
 .baseline/
 .dpkit.json
 .dpkit-baseline.json
+.claude/settings.local.json

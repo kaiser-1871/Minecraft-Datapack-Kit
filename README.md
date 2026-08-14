@@ -155,7 +155,7 @@ note it also disables the `ignore` rules in `.dpkit.json`.
 
 ## MCP server (native AI-IDE calls)
 
-Exposes dpkit's capabilities as MCP tools so Claude Code / Cursor / … can call the real engine
+Exposes dpkit's capabilities as MCP tools so any AI IDE / coding agent can call the real engine
 instead of guessing syntax:
 
 ```bash

@@ -1,4 +1,4 @@
-# CLAUDE.md — dpkit (universal datapack tool: check + teach AI to write commands)
+# AGENTS.md — dpkit (universal datapack tool: check + teach AI to write commands)
 
 This tool is **universal**: it checks any datapack, against any game version. Defaults come
 from `.dpkit.json` (lookup order cwd → home, or `--config=<path>`; see `.dpkit.example.json`).

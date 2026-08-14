@@ -1,5 +1,5 @@
 // mcp.ts — an MCP (Model Context Protocol) stdio server exposing dpkit's capabilities
-// as tools, so AI IDEs (Claude Code, Cursor, …) can call the real Spyglass/DHP engine
+// as tools, so AI IDEs and coding agents (any MCP client) can call the real Spyglass/DHP engine
 // instead of guessing per-version syntax. Each tool call boots a fresh engine (v1); a
 // long-lived pooled project is a possible v2 optimization.
 //

@@ -4,4 +4,3 @@ dist/
 .baseline/
 .dpkit.json
 .dpkit-baseline.json
-.claude/settings.local.json

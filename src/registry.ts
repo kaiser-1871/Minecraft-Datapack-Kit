@@ -9,27 +9,9 @@
 // registry keys are bare too (e.g. "attribute", "worldgen/biome"). The command tree's
 // `properties.registry` is namespaced ("minecraft:mob_effect") — strip the prefix to index.
 
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
 import { DEFAULT_VERSION } from './config.js';
+import { cacheIndexMtime, readCachedObject } from './cache.js';
 import { resolveConcreteVersion } from './syntax.js';
-
-function cacheDir(): string {
-  return join(process.env.LOCALAPPDATA ?? '', 'spyglassmc-nodejs', 'Cache');
-}
-
-function readCachedObject(url: string): unknown {
-  const base = cacheDir();
-  const indexPath = join(base, 'http', 'index.json');
-  let index;
-  try { index = JSON.parse(readFileSync(indexPath, 'utf8')); } catch { return null; }
-  const rec = index.index?.[url]?.[''];
-  if (!rec?.sha1) return null;
-  try {
-    const objPath = join(base, 'http', 'objects', rec.sha1.slice(0, 2), rec.sha1);
-    return JSON.parse(readFileSync(objPath, 'utf8'));
-  } catch { return null; }
-}
 
 export interface RegistryData {
   /** registry name (bare, e.g. "mob_effect") → array of bare ids. */
@@ -46,11 +28,7 @@ let memo: { key: string; data: RegistryData } | null = null;
 export function loadRegistries(version: string = DEFAULT_VERSION): RegistryData {
   let concrete: string;
   try { concrete = resolveConcreteVersion(version); } catch { return {}; }
-  const base = cacheDir();
-  const indexPath = join(base, 'http', 'index.json');
-  let mtime = 0;
-  try { mtime = statSync(indexPath).mtimeMs; } catch { /* no index yet */ }
-  const key = `${concrete}:${mtime}`;
+  const key = `${concrete}:${cacheIndexMtime()}`;
   if (memo?.key === key) return memo.data;
   const url = `https://api.spyglassmc.com/mcje/versions/${concrete}/registries`;
   const raw = readCachedObject(url);

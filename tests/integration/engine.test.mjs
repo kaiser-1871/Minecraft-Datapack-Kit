@@ -35,7 +35,7 @@ test('in-process engine checks the fixture', async () => {
   // gotchas: the particle item bare id is flagged
   const g = report.gotchas.find(x => x.file === 'test/function/gotcha.mcfunction');
   assert.ok(g, 'expected a gotcha in gotcha.mcfunction');
-  assert.ok(g.items.some(i => i.key === '带参粒子裸ID'));
+  assert.ok(g.items.some(i => i.key === 'particle-bare-id'));
 });
 
 test('no-ignore exposes LastHurtMob', async () => {

@@ -10,6 +10,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
+import { z } from 'zod';
 
 /** Built-in fallback version when none is configured: 'auto' reads the checked
  * datapack's pack.mcmeta (offline syntax tools resolve it to the latest cached release). */
@@ -34,18 +35,31 @@ export interface DpkitConfig {
   logcheck?: boolean;
 }
 
+/** Zod schema for .dpkit.json. `.strict()` rejects unknown keys (e.g. a typo'd "datapak")
+ * and wrong types (e.g. ignore: [7]) instead of silently dropping them. */
+const configSchema = z.object({
+  datapack: z.string().optional(),
+  version: z.string().optional(),
+  ignore: z.array(z.string()).optional(),
+  minecraftRoot: z.string().optional(),
+  baselineFile: z.string().optional(),
+  gotchas: z.boolean().optional(),
+  logcheck: z.boolean().optional(),
+}).strict();
+
 /** Locate the config file to use, or null when none is configured. */
 export function findConfigFile(explicit?: string): string | null {
   if (explicit) {
     if (existsSync(explicit)) return explicit;
-    throw new Error(`[dpkit] --config 文件不存在: ${explicit}`);
+    throw new Error(`[dpkit] --config file not found: ${explicit}`);
   }
-  for (const c of [
-    process.env.DPKIT_CONFIG,
-    join(process.cwd(), CONFIG_FILENAME),
-    join(homedir(), CONFIG_FILENAME),
-  ]) {
-    if (!c) continue;
+  // A typo'd DPKIT_CONFIG should fail loudly, not silently fall through to cwd/home.
+  const envConfig = process.env.DPKIT_CONFIG;
+  if (envConfig) {
+    if (existsSync(envConfig)) return envConfig;
+    throw new Error(`[dpkit] DPKIT_CONFIG file not found: ${envConfig}`);
+  }
+  for (const c of [join(process.cwd(), CONFIG_FILENAME), join(homedir(), CONFIG_FILENAME)]) {
     try { if (existsSync(c)) return c; } catch { /* skip unreadable candidate */ }
   }
   return null;
@@ -56,18 +70,18 @@ export function loadConfig(explicit?: string): { config: DpkitConfig; path: stri
   const path = findConfigFile(explicit);
   if (!path) return { config: {}, path: null };
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    const parsed = configSchema.parse(JSON.parse(readFileSync(path, 'utf8')));
     const cfg: DpkitConfig = {};
-    if (typeof raw.datapack === 'string') cfg.datapack = resolvePath(raw.datapack, path);
-    if (typeof raw.version === 'string') cfg.version = raw.version;
-    if (Array.isArray(raw.ignore)) cfg.ignore = raw.ignore.filter((x): x is string => typeof x === 'string');
-    if (typeof raw.minecraftRoot === 'string') cfg.minecraftRoot = resolvePath(raw.minecraftRoot, path);
-    if (typeof raw.baselineFile === 'string') cfg.baselineFile = resolvePath(raw.baselineFile, path);
-    if (typeof raw.gotchas === 'boolean') cfg.gotchas = raw.gotchas;
-    if (typeof raw.logcheck === 'boolean') cfg.logcheck = raw.logcheck;
+    if (parsed.datapack !== undefined) cfg.datapack = resolvePath(parsed.datapack, path);
+    if (parsed.version !== undefined) cfg.version = parsed.version;
+    if (parsed.ignore !== undefined) cfg.ignore = parsed.ignore;
+    if (parsed.minecraftRoot !== undefined) cfg.minecraftRoot = resolvePath(parsed.minecraftRoot, path);
+    if (parsed.baselineFile !== undefined) cfg.baselineFile = resolvePath(parsed.baselineFile, path);
+    if (parsed.gotchas !== undefined) cfg.gotchas = parsed.gotchas;
+    if (parsed.logcheck !== undefined) cfg.logcheck = parsed.logcheck;
     return { config: cfg, path };
   } catch (err) {
-    throw new Error(`[dpkit] 配置文件 ${path} 无法解析: ${(err as Error).message}`);
+    throw new Error(`[dpkit] config file ${path} could not be parsed: ${(err as Error).message}`);
   }
 }
 

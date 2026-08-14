@@ -7,28 +7,8 @@
 //
 // Port of the original syntax.mjs with TypeScript annotations.
 
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
 import { DEFAULT_VERSION } from './config.js';
-
-// ---- cache access -----------------------------------------------------------
-function cacheDir(): string {
-  return join(process.env.LOCALAPPDATA ?? '', 'spyglassmc-nodejs', 'Cache');
-}
-
-// Memoized cache index. Keyed by index.json mtime so the engine's cache refresh during a
-// check invalidates it (an index read before the refresh would otherwise serve stale entries).
-let indexMemo: { mtime: number; index: unknown } | null = null;
-function readIndex(): unknown {
-  const indexPath = join(cacheDir(), 'http', 'index.json');
-  let mtime = 0;
-  try { mtime = statSync(indexPath).mtimeMs; } catch { /* no index yet */ }
-  if (indexMemo?.mtime === mtime) return indexMemo.index;
-  let index: unknown = null;
-  try { index = JSON.parse(readFileSync(indexPath, 'utf8')); } catch { /* unreadable */ }
-  indexMemo = { mtime, index };
-  return index;
-}
+import { cacheIndexMtime, readCacheIndex, readCachedObject } from './cache.js';
 
 /**
  * Read the cached version list (/mcje/versions) as an array, or null if not cached.
@@ -36,40 +16,34 @@ function readIndex(): unknown {
  * data_pack_version, resource_pack_version }.
  */
 export function loadCachedVersions(): unknown[] | null {
-  const base = cacheDir();
-  const index = readIndex() as { index?: Record<string, unknown> } | null;
-  const rec = (index?.index as Record<string, { ''?: { sha1?: string } }> | undefined)?.['https://api.spyglassmc.com/mcje/versions']?.[''];
-  if (!rec) return null;
-  try {
-    const objPath = join(base, 'http', 'objects', rec.sha1!.slice(0, 2), rec.sha1!);
-    const d = JSON.parse(readFileSync(objPath, 'utf8'));
-    return Array.isArray(d) ? d : null;
-  } catch { return null; }
+  const d = readCachedObject('https://api.spyglassmc.com/mcje/versions');
+  return Array.isArray(d) ? d : null;
 }
 
 /**
  * Resolve a version specifier to a concrete version id we have data for.
- * 'auto' / 'latest release' / 'latest snapshot' → the latest release (or, failing
- * that, the newest entry) in the local cache; a concrete id passes through unchanged.
- * Throws a helpful error when nothing is cached yet.
+ * 'auto' / 'latest release' → the latest release; 'latest snapshot' → the latest
+ * snapshot; a concrete id passes through unchanged. Falls back to the newest entry
+ * only when the requested type isn't cached (so 'latest snapshot' never silently
+ * resolves to a release). Throws a helpful error when nothing is cached yet.
  */
 export function resolveConcreteVersion(version: string): string {
   if (!['auto', 'latest release', 'latest snapshot'].includes(version)) return version;
   const cached = loadCachedVersions();
   if (Array.isArray(cached) && cached.length) {
     const entries = cached as Array<{ type?: string; id?: string }>;
-    const release = entries.find(v => v.type === 'release');
-    const pick = release ?? entries[0];
+    const want = version === 'latest snapshot' ? 'snapshot' : 'release';
+    const pick = entries.find(v => v.type === want) ?? entries[0];
     if (pick?.id) return pick.id;
   }
   throw new Error(
-    `[dpkit] 版本 '${version}' 需要解析成具体版本,但本地还没有版本缓存。请先在线跑一次 node dpkit.mjs 下载数据,或用 --version=<具体版本> 指定。`,
+    `[dpkit] version '${version}' needs a concrete version, but no version data is cached locally. Run node dpkit.mjs online once to download it, or pin --version=<concrete-version>.`,
   );
 }
 
 /** Set of version ids whose command data is already cached locally. */
 export function cachedCommandVersions(): Set<string> {
-  const index = readIndex() as { index?: Record<string, unknown> } | null;
+  const index = readCacheIndex() as { index?: Record<string, unknown> } | null;
   const out = new Set<string>();
   for (const k of Object.keys(index?.index ?? {})) {
     const m = k.match(/\/mcje\/versions\/([^/]+)\/commands$/);
@@ -78,21 +52,27 @@ export function cachedCommandVersions(): Set<string> {
   return out;
 }
 
+// Memoized command tree, keyed by (concrete version, cache index mtime) so the engine's
+// refresh invalidates it — the long-lived MCP server would otherwise re-parse the whole
+// per-version tree on every query_syntax / check_datapack call.
+let treeMemo: { key: string; tree: CommandNode } | null = null;
+
 /**
  * Load the parsed command tree for a version from the local HTTP cache.
  * Returns the root node { type:'root', children } or throws a helpful Error.
  */
 export function loadCommandTree(version: string = DEFAULT_VERSION): CommandNode {
   const concrete = resolveConcreteVersion(version);
-  const base = cacheDir();
-  const index = readIndex() as { index?: Record<string, { '': { sha1?: string } }> } | null;
+  const key = `${concrete}:${cacheIndexMtime()}`;
+  if (treeMemo?.key === key) return treeMemo.tree;
   const url = `https://api.spyglassmc.com/mcje/versions/${concrete}/commands`;
-  const rec = index?.index?.[url]?.[''];
-  if (!rec?.sha1) {
-    throw new Error(`缓存里没有版本 ${concrete} 的命令数据 (${url})。请先跑一次 node dpkit.mjs --version=${concrete} 下载。`);
+  const obj = readCachedObject(url);
+  if (obj == null) {
+    throw new Error(`No command data cached for version ${concrete} (${url}). Run node dpkit.mjs --version=${concrete} once to download it.`);
   }
-  const objPath = join(base, 'http', 'objects', rec.sha1.slice(0, 2), rec.sha1);
-  return JSON.parse(readFileSync(objPath, 'utf8'));
+  const tree = obj as CommandNode;
+  treeMemo = { key, tree };
+  return tree;
 }
 
 // ---- command-tree node shapes ------------------------------------------------
@@ -106,78 +86,78 @@ export interface CommandNode {
 }
 export type CommandTree = CommandNode;
 
-// ---- parser → Chinese description map ---------------------------------------
+// ---- parser → description map ---------------------------------------
 // properties are appended where relevant (ranges, entity type/amount, registry).
 const PARSER_DESC: Record<string, string> = {
-  'brigadier:bool': '布尔值',
-  'brigadier:double': '浮点数',
-  'brigadier:float': '浮点数',
-  'brigadier:integer': '整数',
-  'brigadier:string': '字符串',
-  'minecraft:block_pos': '方块坐标 x y z',
-  'minecraft:block_predicate': '方块谓词(ID/标签,可带状态谓词)',
-  'minecraft:block_state': '方块状态,如 minecraft:stone[axis=y]',
-  'minecraft:column_pos': '列坐标',
-  'minecraft:component': '数据组件 ID,如 minecraft:damage、minecraft:food',
-  'minecraft:dialog': '对话框 ID',
-  'minecraft:dimension': '维度 ID,如 minecraft:overworld',
-  'minecraft:entity': '实体/玩家选择器',
-  'minecraft:entity_anchor': '锚点: eyes | feet',
-  'minecraft:float_range': '浮点区间,如 1.5..5',
-  'minecraft:function': '函数 ID,如 minecraft:foo/bar',
-  'minecraft:game_profile': '玩家名或玩家选择器',
-  'minecraft:gamemode': '游戏模式: survival|creative|adventure|spectator',
-  'minecraft:heightmap': '高度图: world_surface|motion_blocking|ocean_floor|motion_blocking_no_leaves|ocean_floor_wg|world_surface_wg',
-  'minecraft:hex_color': '十六进制颜色 #rrggbb',
-  'minecraft:int_range': '整数区间,如 1..5',
-  'minecraft:item_predicate': '物品谓词(ID/标签,可带组件谓词)',
-  'minecraft:item_slot': '物品栏槽位,如 armor.head、weapon.mainhand',
-  'minecraft:item_slots': '槽位集合,用 , 分隔',
-  'minecraft:item_stack': '物品堆,如 minecraft:diamond_sword 1',
-  'minecraft:loot_modifier': '战利品修饰表 ID',
-  'minecraft:loot_predicate': '战利品谓词表 ID',
-  'minecraft:loot_table': '战利品表 ID',
-  'minecraft:message': '消息文本(支持 @s 等选择器)',
-  'minecraft:nbt_compound_tag': 'NBT 复合标签,如 {id:"minecraft:stone"}',
-  'minecraft:nbt_path': 'NBT 路径,如 Items[0].tag',
-  'minecraft:nbt_tag': 'NBT 任意标签',
-  'minecraft:objective': '计分板目标 ID',
-  'minecraft:objective_criteria': '计分板判据,如 minecraft:damage_taken',
-  'minecraft:operation': '计分板操作: += -= *= /= %= = < > ><',
-  'minecraft:particle': '粒子 ID,如 minecraft:crit',
-  'minecraft:resource': '注册表条目',
-  'minecraft:resource_key': '注册表键(可省略 minecraft:)',
-  'minecraft:resource_location': '资源位置 ID,如 minecraft:diamond',
-  'minecraft:resource_or_tag': 'ID 或 #标签',
-  'minecraft:resource_or_tag_key': 'ID 或 #标签(键)',
-  'minecraft:resource_selector': '资源选择器',
-  'minecraft:rotation': '旋转 x y',
-  'minecraft:score_holder': '计分板实体/名字(* 表示全部)',
-  'minecraft:scoreboard_slot': '计分板槽位,如 sidebar、red.green',
-  'minecraft:style': '文本样式',
-  'minecraft:swizzle': '轴序,如 xyz、xz',
-  'minecraft:team': '队伍 ID',
-  'minecraft:team_color': '队伍颜色',
-  'minecraft:template_mirror': '结构镜像: none|left_right|front_back',
-  'minecraft:template_rotation': '结构旋转: none|clockwise_90|counterclockwise_90|180',
-  'minecraft:time': '游戏刻数',
+  'brigadier:bool': 'Boolean',
+  'brigadier:double': 'Double (floating-point number)',
+  'brigadier:float': 'Float (floating-point number)',
+  'brigadier:integer': 'Integer',
+  'brigadier:string': 'String',
+  'minecraft:block_pos': 'Block position x y z',
+  'minecraft:block_predicate': 'Block predicate (ID/tag, optional state predicate)',
+  'minecraft:block_state': 'Block state, e.g. minecraft:stone[axis=y]',
+  'minecraft:column_pos': 'Column position',
+  'minecraft:component': 'Data component ID, e.g. minecraft:damage, minecraft:food',
+  'minecraft:dialog': 'Dialog ID',
+  'minecraft:dimension': 'Dimension ID, e.g. minecraft:overworld',
+  'minecraft:entity': 'Entity / player selector',
+  'minecraft:entity_anchor': 'Anchor: eyes | feet',
+  'minecraft:float_range': 'Float range, e.g. 1.5..5',
+  'minecraft:function': 'Function ID, e.g. minecraft:foo/bar',
+  'minecraft:game_profile': 'Player name or player selector',
+  'minecraft:gamemode': 'Game mode: survival|creative|adventure|spectator',
+  'minecraft:heightmap': 'Heightmap: world_surface|motion_blocking|ocean_floor|motion_blocking_no_leaves|ocean_floor_wg|world_surface_wg',
+  'minecraft:hex_color': 'Hex color #rrggbb',
+  'minecraft:int_range': 'Integer range, e.g. 1..5',
+  'minecraft:item_predicate': 'Item predicate (ID/tag, optional component predicate)',
+  'minecraft:item_slot': 'Inventory slot, e.g. armor.head, weapon.mainhand',
+  'minecraft:item_slots': 'Set of slots, comma-separated',
+  'minecraft:item_stack': 'Item stack, e.g. minecraft:diamond_sword 1',
+  'minecraft:loot_modifier': 'Loot modifier table ID',
+  'minecraft:loot_predicate': 'Loot predicate table ID',
+  'minecraft:loot_table': 'Loot table ID',
+  'minecraft:message': 'Message text (supports @s etc. selectors)',
+  'minecraft:nbt_compound_tag': 'NBT compound tag, e.g. {id:"minecraft:stone"}',
+  'minecraft:nbt_path': 'NBT path, e.g. Items[0].tag',
+  'minecraft:nbt_tag': 'NBT tag (any type)',
+  'minecraft:objective': 'Scoreboard objective ID',
+  'minecraft:objective_criteria': 'Scoreboard criteria, e.g. minecraft:damage_taken',
+  'minecraft:operation': 'Scoreboard operation: += -= *= /= %= = < > ><',
+  'minecraft:particle': 'Particle ID, e.g. minecraft:crit',
+  'minecraft:resource': 'Registry entry',
+  'minecraft:resource_key': 'Registry key (minecraft: prefix optional)',
+  'minecraft:resource_location': 'Resource location ID, e.g. minecraft:diamond',
+  'minecraft:resource_or_tag': 'ID or #tag',
+  'minecraft:resource_or_tag_key': 'ID or #tag (key)',
+  'minecraft:resource_selector': 'Resource selector',
+  'minecraft:rotation': 'Rotation x y',
+  'minecraft:score_holder': 'Scoreboard holder entity/name (* = all)',
+  'minecraft:scoreboard_slot': 'Scoreboard slot, e.g. sidebar, red.green',
+  'minecraft:style': 'Text style',
+  'minecraft:swizzle': 'Axis swizzle, e.g. xyz, xz',
+  'minecraft:team': 'Team ID',
+  'minecraft:team_color': 'Team color',
+  'minecraft:template_mirror': 'Structure mirror: none|left_right|front_back',
+  'minecraft:template_rotation': 'Structure rotation: none|clockwise_90|counterclockwise_90|180',
+  'minecraft:time': 'Game ticks',
   'minecraft:uuid': 'UUID',
-  'minecraft:vec2': '2D 坐标 x y',
-  'minecraft:vec3': '3D 坐标 x y z',
+  'minecraft:vec2': '2D coordinates x y',
+  'minecraft:vec3': '3D coordinates x y z',
 };
 
 function parserProps(parser: string, props?: Record<string, unknown> | null): string {
   const desc = PARSER_DESC[parser] ?? `(parser ${parser})`;
   const bits: string[] = [];
   if (props) {
-    if (props.registry) bits.push(`注册表:${props.registry}`);
-    if (props.type === 'players') bits.push('限玩家');
-    if (props.type === 'entities') bits.push('实体');
-    if (props.amount === 'multiple') bits.push('可多个');
-    if (props.amount === 'single') bits.push('单个');
-    if (props.type === 'greedy') bits.push('到行尾');
-    if (props.type === 'word') bits.push('单词');
-    if (props.type === 'phrase') bits.push('短语(可引号)');
+    if (props.registry) bits.push(`registry:${props.registry}`);
+    if (props.type === 'players') bits.push('players only');
+    if (props.type === 'entities') bits.push('entities');
+    if (props.amount === 'multiple') bits.push('multiple allowed');
+    if (props.amount === 'single') bits.push('single');
+    if (props.type === 'greedy') bits.push('to end of line');
+    if (props.type === 'word') bits.push('word');
+    if (props.type === 'phrase') bits.push('phrase (quotable)');
     if (typeof props.min === 'number') bits.push(`≥${props.min}`);
     if (typeof props.max === 'number') bits.push(`≤${props.max}`);
   }
@@ -197,11 +177,11 @@ function nextSummary(node: CommandNode): string[] {
   const args = Object.entries(kids).filter(([, v]) => isArgument(v)).map(([k]) => `<${k}>`);
   if (literals.length || args.length) {
     const all = [...literals, ...args];
-    out.push(`下一项${all.length === 1 ? '' : `(${all.length}选1)`}: ${all.join(' | ')}`);
+    out.push(`Next${all.length === 1 ? '' : ` (${all.length} alternatives)`}: ${all.join(' | ')}`);
   }
-  if (node?.executable) out.push('【命令可在此结束】');
+  if (node?.executable) out.push('[command may end here]');
   if (node?.redirect?.length) {
-    out.push(`↻ 之后继续(redirect → ${node.redirect.join(' ')}): ${node.redirect.join(' ')}`);
+    out.push(`↻ then continue (redirect → ${node.redirect.join(' ')}): ${node.redirect.join(' ')}`);
   }
   return out;
 }
@@ -241,17 +221,17 @@ function renderSubtree(node: CommandNode | undefined, indent: string, depth: num
           lines.push(...renderSubtree(v, `${indent}    `, depth - 1, seen, budget));
         }
       } else {
-        push(`${indent}└─ ${alt}   …(更深用 --depth=N)`);
+        push(`${indent}└─ ${alt}   …(deeper: use --depth=N)`);
       }
     }
   }
-  if (node?.executable) push(`${indent}   ↳ 命令可在此结束`);
+  if (node?.executable) push(`${indent}   ↳ command may end here`);
   if (node?.redirect?.length) {
     // dedupe: same redirect target from sibling literal branches (e.g. execute.on)
     const key = node.redirect.join(' ');
     if (!seen.has(key)) {
       seen.add(key);
-      push(`${indent}   ↻ 链回: ${key} (可继续跟该命令的后续子命令)`);
+      push(`${indent}   ↻ chains to: ${key} (can continue with that command's subcommands)`);
     }
   }
   return lines;
@@ -269,8 +249,8 @@ export function renderPath(tree: CommandTree, segs: string[], depth = 4): { foun
     if (!next) {
       const known = Object.keys(node?.children ?? {}).sort();
       const tip = known.length
-        ? `“${seg}” 不在 ${walked.join(' ')} 之下。已知下一级: ${known.join(', ')}`
-        : `“${seg}” 处没有更多子命令。`;
+        ? `"${seg}" is not under ${walked.join(' ')}. Known next level: ${known.join(', ')}`
+        : `"${seg}" has no further subcommands.`;
       return { found: false, path: walked, lines: [tip] };
     }
     walked.push(seg);
@@ -280,17 +260,17 @@ export function renderPath(tree: CommandTree, segs: string[], depth = 4): { foun
   // node is guaranteed defined here: the loop above returns early whenever a segment is missing.
   const n = node!;
   const lines: string[] = [];
-  lines.push(`命令路径: ${walked.join(' ')}`);
+  lines.push(`Command path: ${walked.join(' ')}`);
   if (isArgument(n)) {
-    lines.push(`参数: <${walked[walked.length - 1]}>  ${parserProps(n.parser ?? '', n.properties)}`);
+    lines.push(`Argument: <${walked[walked.length - 1]}>  ${parserProps(n.parser ?? '', n.properties)}`);
   }
   lines.push(...nextSummary(n));
   if (depth > 0 && Object.keys(n.children ?? {}).length) {
     lines.push('');
-    lines.push(`— 展开 (depth=${depth},不跟随 redirect 以防循环) —`);
+    lines.push(`— expansion (depth=${depth}, redirects not followed to avoid cycles) —`);
     const budget: Budget = { left: 500, truncated: false };
     lines.push(...renderSubtree(n, '', depth, new Set(), budget));
-    if (budget.truncated) lines.push('…(行数超 500 上限, 输出被截断; 收窄路径如 --syntax="execute if block" 可看更多)');
+    if (budget.truncated) lines.push('…(line count over 500 limit, output truncated; narrow the path like --syntax="execute if block" to see more)');
   }
   return { found: true, path: walked, lines };
 }

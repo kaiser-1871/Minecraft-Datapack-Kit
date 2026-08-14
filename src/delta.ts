@@ -3,7 +3,7 @@
 // The baseline file holds MULTIPLE datapacks: one entry per "datapack@@version" key, so
 // checking different packs doesn't clobber each other's history. Legacy single-entry
 // files (top-level datapack/version/files) are still read and migrated on save.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import type { BaselineEntry, RawDiagnostic } from './types.js';
 
 /** Stable signature of a file's non-ignored issues, for --delta comparison. */
@@ -64,5 +64,9 @@ export function saveBaseline(
   delete store.datapack;
   delete store.version;
   delete store.files;
-  writeFileSync(baselineFile, JSON.stringify(store, null, 2));
+  // Atomic write: write to a temp file then rename over the target, so an interrupted
+  // write (Ctrl-C, crash) can't leave a half-written baseline that breaks the next --delta.
+  const tmp = `${baselineFile}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(store, null, 2));
+  renameSync(tmp, baselineFile);
 }

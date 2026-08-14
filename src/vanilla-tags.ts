@@ -7,26 +7,9 @@
 // We only scan headers (name + size), so extraction is cheap and never materializes contents.
 // Returns null when the tarball isn't cached for the version (filter degrades to no-op).
 
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { cacheIndexMtime, readCachedBytes } from './cache.js';
 import { resolveConcreteVersion } from './syntax.js';
-
-function cacheDir(): string {
-  return join(process.env.LOCALAPPDATA ?? '', 'spyglassmc-nodejs', 'Cache');
-}
-
-function readCachedBytes(url: string): Buffer | null {
-  const base = cacheDir();
-  const indexPath = join(base, 'http', 'index.json');
-  let index;
-  try { index = JSON.parse(readFileSync(indexPath, 'utf8')); } catch { return null; }
-  const rec = index.index?.[url]?.[''];
-  if (!rec?.sha1) return null;
-  try {
-    return readFileSync(join(base, 'http', 'objects', rec.sha1.slice(0, 2), rec.sha1));
-  } catch { return null; }
-}
 
 let memo: { key: string; tags: Set<string> } | null = null;
 
@@ -37,10 +20,7 @@ let memo: { key: string; tags: Set<string> } | null = null;
 export function loadVanillaTags(version: string): Set<string> | null {
   let concrete: string;
   try { concrete = resolveConcreteVersion(version); } catch { return null; }
-  const indexPath = join(cacheDir(), 'http', 'index.json');
-  let mtime = 0;
-  try { mtime = statSync(indexPath).mtimeMs; } catch { /* no index yet */ }
-  const key = `${concrete}:${mtime}`;
+  const key = `${concrete}:${cacheIndexMtime()}`;
   if (memo?.key === key) return memo.tags;
 
   const raw = readCachedBytes(`https://api.spyglassmc.com/mcje/versions/${concrete}/vanilla-data/tarball`);

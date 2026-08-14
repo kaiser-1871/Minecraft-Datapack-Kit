@@ -22,6 +22,12 @@ export async function main(): Promise<void> {
   let cfg;
   try { cfg = loadConfig().config; } catch (e) { console.error((e as Error).message); process.exit(1); }
 
+  // One pooled engine shared across all tool calls (its own per-datapack@@version Service cache),
+  // so repeated check_datapack / complete_at calls skip the init()+ready() cost. A per-call
+  // 'inproc'/'lsp' string still builds a one-shot engine.
+  const pooledEngine = api.createInProcEnginePool();
+  const pickEngine = (e?: 'inproc' | 'lsp' | 'pool') => (e === 'inproc' || e === 'lsp' ? e : pooledEngine);
+
   const defaultDatapack = (version: string): string =>
     process.env.DPKIT_DATAPACK ?? cfg.datapack ?? detectDefaultDatapack(version, cfg.minecraftRoot)
     ?? '';
@@ -45,10 +51,11 @@ export async function main(): Promise<void> {
       datapack: z.string().optional().describe('Datapack path. Defaults to config / $DPKIT_DATAPACK / auto-detect.'),
       version: z.string().optional().describe('Game version to check as. Defaults to config / $DPKIT_VERSION.'),
       files: z.string().optional().describe('data/-relative glob, e.g. test/function/*.mcfunction.'),
-      engine: z.enum(['inproc', 'lsp']).optional().describe('Engine: in-process (default) or legacy LSP subprocess.'),
+      engine: z.enum(['inproc', 'lsp', 'pool']).optional().describe('Engine: pooled in-process (default) / one-shot in-process / legacy LSP subprocess.'),
       noIgnore: z.boolean().optional().describe('Skip filtering the known LastHurtMob false positive.'),
       noGotchas: z.boolean().optional().describe('Skip the known-gotcha heuristic scan.'),
       noMacro: z.boolean().optional().describe('Skip the $ macro-line registry-ID check.'),
+      noEntityNbt: z.boolean().optional().describe('Skip the entity-NBT schema check (summon/data field names + registry IDs).'),
       noLog: z.boolean().optional().describe('Skip the game-log self-check.'),
     },
   }, async (args) => {
@@ -58,10 +65,11 @@ export async function main(): Promise<void> {
         datapack: args.datapack ?? defaultDatapack(version),
         version,
         only: args.files,
-        engine: args.engine,
+        engine: pickEngine(args.engine),
         ignore: { useIgnore: !args.noIgnore, extra: [] },
         noGotchas: args.noGotchas,
         noMacro: args.noMacro,
+        noEntityNbt: args.noEntityNbt,
         noLog: args.noLog,
         minecraftRoot: cfg.minecraftRoot,
       });
@@ -99,7 +107,7 @@ export async function main(): Promise<void> {
       column: z.number().int().min(1).describe('1-based column.'),
       datapack: z.string().optional().describe('Datapack path. Defaults to config / $DPKIT_DATAPACK / auto-detect.'),
       version: z.string().optional().describe('Game version. Defaults to config / $DPKIT_VERSION.'),
-      engine: z.enum(['inproc', 'lsp']).optional().describe('Engine. Default in-process.'),
+      engine: z.enum(['inproc', 'lsp', 'pool']).optional().describe('Engine. Default pooled in-process.'),
     },
   }, async (args) => {
     try {
@@ -110,7 +118,7 @@ export async function main(): Promise<void> {
         rel: args.file,
         line: args.line,
         column: args.column,
-        engine: args.engine,
+        engine: pickEngine(args.engine),
       });
       return { content: [{ type: 'text', text: JSON.stringify({ file: args.file, line: args.line, column: args.column, version, count: items.length, items }, null, 2) }] };
     } catch (e) {
@@ -174,7 +182,11 @@ export async function main(): Promise<void> {
   });
 
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  try {
+    await server.connect(transport);
+  } finally {
+    await pooledEngine.close();
+  }
 }
 
 // Entry point for `npm run mcp` / `node dist/mcp.js`.

@@ -17,6 +17,8 @@ export interface EngineCheckOptions {
   /** data/-relative paths, parallel to `files`. */
   rels: string[];
   mode: 'open' | 'analyze';
+  /** Disable the gotcha linter rules in the engine config (mirrors --no-gotchas). */
+  noGotchas?: boolean;
   verbose?: boolean;
   onLog?: (msg: string) => void;
 }
@@ -34,8 +36,18 @@ export interface EngineCompleteOptions {
   onLog?: (msg: string) => void;
 }
 
+/** A snapshot of the engine's current per-file diagnostics (for incremental watch re-renders). */
+export interface EngineSnapshot {
+  diagnosticsByRel: Map<string, RawDiagnostic[]>;
+  resolvedVersion: string | null;
+}
+
 export interface CheckEngine {
   check(opts: EngineCheckOptions): Promise<EngineCheckResult>;
   complete(opts: EngineCompleteOptions): Promise<CompletionItemDTO[]>;
   close(): Promise<void>;
+  /** Optional incremental update: re-parse/bind/check ONE file in place (no full analysis). */
+  updateFile?(opts: { rel: string; file: string; text: string }): Promise<void>;
+  /** Optional: the diagnostics map the engine currently holds (after check/updateFile calls). */
+  snapshot?(): EngineSnapshot;
 }

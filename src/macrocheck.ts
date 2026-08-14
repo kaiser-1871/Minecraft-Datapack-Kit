@@ -17,6 +17,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CommandTree } from './syntax.js';
+import { normalizeRegistryName } from './registry.js';
 import type { RegistryData } from './registry.js';
 
 export interface MacroIssue {
@@ -62,10 +63,6 @@ function argWidth(parser?: string): number {
   }
 }
 
-function bareRegistryName(name: string): string {
-  return name.startsWith('minecraft:') ? name.slice('minecraft:'.length) : name;
-}
-
 /**
  * Build the set of data-driven registry entries the pack declares: "registry/bareId" for every
  * .json under data/<ns>/<registry>/…/<id>.json (tags/ subtrees excluded — tag refs are never
@@ -105,7 +102,7 @@ interface SlotResult {
  * registry has no cached data) — never warns, counts as unchecked.
  */
 function classifyToken(tok: string, regName: string, regs: RegistryData, declared: Set<string>): SlotResult {
-  const reg = bareRegistryName(regName);
+  const reg = normalizeRegistryName(regName);
   if (tok.startsWith('#')) return { verdict: 'skip', regName: reg };
   let bare = tok;
   if (tok.startsWith('minecraft:')) bare = tok.slice('minecraft:'.length);
@@ -175,8 +172,8 @@ function walkLine(tree: CommandTree, tokens: string[], regs: RegistryData, decla
         if (res.verdict === 'invalid') {
           out.issues.push({
             line: 0, // filled by caller
-            key: '宏行注册表',
-            msg: `[macro] 注册表 '${tok}' 不在 ${res.regName} 注册表中(若为包内自定义数据需先声明;用 --registry=${res.regName} 查该版本合法值)`,
+            key: 'macro-registry',
+            msg: `[macro] registry '${tok}' is not in the ${res.regName} registry (if it is custom pack data, declare it first; use --registry=${res.regName} to list valid values for this version)`,
           });
         } else if (res.verdict === 'skip') {
           out.unchecked++;
@@ -207,15 +204,19 @@ function walkLine(tree: CommandTree, tokens: string[], regs: RegistryData, decla
 /**
  * Scan one .mcfunction file for registry IDs inside $ macro lines. tree/regs/declared are
  * loaded once per check by the caller. Returns per-line issues + coverage stats.
+ * `text`, when supplied, is used instead of re-reading the file from disk (the caller has
+ * often already read it to test for "$(").
  */
 export function scanMacroRegistry(
   filePath: string,
   tree: CommandTree,
   regs: RegistryData,
   declared: Set<string>,
+  text?: string,
 ): MacroScanResult {
-  let text: string;
-  try { text = readFileSync(filePath, 'utf8'); } catch { return { issues: [], lines: 0, checked: 0, unchecked: 0 }; }
+  if (text === undefined) {
+    try { text = readFileSync(filePath, 'utf8'); } catch { return { issues: [], lines: 0, checked: 0, unchecked: 0 }; }
+  }
   const result: MacroScanResult = { issues: [], lines: 0, checked: 0, unchecked: 0 };
 
   text.split('\n').forEach((rawLine, idx) => {

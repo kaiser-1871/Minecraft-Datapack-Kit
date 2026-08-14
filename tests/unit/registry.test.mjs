@@ -54,3 +54,15 @@ test('queryRegistry returns values for a known registry and an index for an unkn
   const mob = unknown.index?.find(x => x.name === 'mob_effect');
   assert.ok(mob && mob.count >= 40);
 });
+
+test('queryRegistry distinguishes cache-miss (cached:false) from a genuinely unknown name', () => {
+  // uncached version → no registry data at all, reported as cached:false (not "removed")
+  const miss = queryRegistry('mob_effect', '0.0.none');
+  assert.equal(miss.found, false);
+  assert.equal(miss.cached, false);
+
+  // a known version with cached data still has cached:true even for an unknown registry name
+  const unknown = queryRegistry('nope', '26.2');
+  assert.equal(unknown.found, false);
+  assert.equal(unknown.cached, true);
+});

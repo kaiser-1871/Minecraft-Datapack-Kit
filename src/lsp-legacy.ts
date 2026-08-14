@@ -3,32 +3,15 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import * as core from '@spyglassmc/core';
 import { SERVER } from './paths.js';
+import { completionItemsOf } from './completion-map.js';
 import type { CompletionItemDTO, RawDiagnostic } from './types.js';
 import type { CheckEngine, EngineCheckOptions, EngineCheckResult, EngineCompleteOptions } from './engine/types.js';
 
-const KIND_NAMES: Record<number, string> = {
-  1:'文本',2:'方法',3:'函数',4:'构造',5:'字段',6:'变量',7:'类',8:'接口',9:'模块',10:'属性',11:'单位',12:'值',13:'枚举',14:'关键字',15:'片段',16:'颜色',17:'文件',18:'引用',19:'文件夹',20:'枚举成员',21:'常量',22:'结构',23:'事件',24:'操作符',25:'类型参数',
-};
-
-export function completionItemsOf(res: unknown): CompletionItemDTO[] {
-  return (Array.isArray(res) ? res : ((res as { items?: unknown[] })?.items ?? [])).map(it => {
-    const item = it as { label?: string; kind?: number; detail?: string | null; documentation?: unknown };
-    let documentation: string | null = null;
-    if (item.documentation != null) {
-      if (typeof item.documentation === 'object') {
-        const v = (item.documentation as { value?: unknown })?.value;
-        documentation = v == null ? '' : String(v);
-      } else {
-        documentation = String(item.documentation);
-      }
-    }
-    return { label: item.label ?? '', kind: KIND_NAMES[item.kind ?? 0] ?? null, detail: item.detail ?? null, documentation };
-  });
-}
-
-// Mirror @spyglassmc/core's normalizeUriPathname: lowercase Windows drive letters.
-const normUri = (uri: string): string => uri.replace(/^file:\/\/\/[A-Z]:\//, m => m.toLowerCase());
+// Reuse the engine's own URI normalization (lowercases the drive letter AND un-encodes any
+// %3A-encoded colon) so the --engine=lsp path keys diagnostics exactly like the inproc engine.
+const normUri = (uri: string): string => core.normalizeUri(uri);
 
 interface PendingEntry { resolve: (v: unknown) => void; reject: (e: unknown) => void }
 
@@ -45,6 +28,7 @@ class LspSession {
   private diagnostics = new Map<string, RawDiagnostic[]>(); // normUri -> array (last wins)
   private failed = new Set<string>(); // normUri -> server threw during check
   private opened = new Set<string>(); // normUri
+  private settled = new Set<string>(); // normUri -> terminal state reached (diagnostics OR failed)
   readonly serverLog: string[] = [];
   private readyFlag = false;
   private readyWaiters: { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }[] = [];
@@ -92,7 +76,14 @@ class LspSession {
       if (this.buf.length < total + len) break;
       const body = this.buf.slice(total, total + len).toString('utf8');
       this.buf = this.buf.slice(total + len);
-      this.#handleMessage(JSON.parse(body));
+      try {
+        this.#handleMessage(JSON.parse(body));
+      } catch (e) {
+        // A malformed/truncated server frame shouldn't crash the CLI as an uncaught throw;
+        // fail the session so pending waits resolve (rather than hang) and surface it.
+        this.onLog?.(`[check] malformed server message dropped: ${(e as Error).message}`);
+        this.#rejectAll(e as Error);
+      }
     }
   }
 
@@ -121,6 +112,7 @@ class LspSession {
         const uri = normUri(msg.params.uri);
         if (!this.opened.has(uri)) return; // ignore diagnostics for non-client-managed files
         this.diagnostics.set(uri, msg.params.diagnostics ?? []);
+        this.settled.add(uri);
         this.#checkSettled();
         break;
       }
@@ -128,7 +120,9 @@ class LspSession {
         this.serverLog.push(msg.params.message);
         const m = msg.params.message.match(/\[Project\] \[check\] Failed for (file:\/\/\S+)/);
         if (m) {
-          this.failed.add(normUri(m[1]));
+          const uri = normUri(m[1]);
+          this.failed.add(uri);
+          this.settled.add(uri);
           this.#checkSettled();
         }
         this.onLog?.(`[server] ${msg.params.message}`);
@@ -140,26 +134,28 @@ class LspSession {
       case '$/progress': {
         if (msg.params.token === 'initialize' && msg.params.value?.kind === 'end') {
           this.readyFlag = true;
-          this.#readyAll(true, new Error());
+          this.#readyAll(true);
         }
         break;
       }
     }
   }
 
-  #readyAll(ok: boolean, err: Error): void {
+  #readyAll(ok: boolean, err?: Error): void {
     const ws = this.readyWaiters.splice(0);
-    for (const w of ws) { clearTimeout(w.timer); ok ? w.resolve() : w.reject(err); }
+    for (const w of ws) { clearTimeout(w.timer); ok ? w.resolve() : w.reject(err!); }
   }
 
-  #settleAll(ok: boolean, err: Error): void {
+  #settleAll(ok: boolean, err?: Error): void {
     const ws = this.settleWaiters.splice(0);
-    for (const w of ws) { clearTimeout(w.timer); ok ? w.resolve() : w.reject(err); }
+    for (const w of ws) { clearTimeout(w.timer); ok ? w.resolve() : w.reject(err!); }
   }
 
+  // Settle is per-URI terminal state (diagnostics OR failed) so a file counted in both sets
+  // can't double-count and trigger an early settle.
   #checkSettled(): void {
-    if (this.opened.size > 0 && this.diagnostics.size + this.failed.size >= this.opened.size) {
-      this.#settleAll(true, new Error());
+    if (this.opened.size > 0 && this.settled.size >= this.opened.size) {
+      this.#settleAll(true);
     }
   }
 
@@ -176,10 +172,14 @@ class LspSession {
 
   /** Resolves once every opened file has emitted diagnostics or been marked failed. */
   waitSettled(timeoutMs: number): Promise<void> {
-    if (this.opened.size > 0 && this.diagnostics.size + this.failed.size >= this.opened.size) return Promise.resolve();
+    if (this.opened.size > 0 && this.settled.size >= this.opened.size) return Promise.resolve();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.#settleAll(false, new Error(`timed out waiting for diagnostics (received ${this.diagnostics.size}/${this.opened.size}). Server log:\n${this.serverLog.join('\n')}`));
+        // Some opened files never publish diagnostics nor fail (e.g. a .json the server
+        // excludes). Don't hang or hard-fail: surface them and move on — the caller reports
+        // any file with no diagnostics as "no diagnostics received" (matching the inproc path).
+        this.onLog?.(`[check] settle timed out — ${this.opened.size - this.settled.size}/${this.opened.size} file(s) produced no diagnostics (server may have excluded them)`);
+        this.#settleAll(true);
       }, timeoutMs);
       this.settleWaiters.push({ resolve, reject, timer });
     });
@@ -229,18 +229,25 @@ export function createLspEngine(): CheckEngine {
     session.onLog = (msg) => {
       if (opts.verbose || SERVER_LOG_FILTER.test(msg)) opts.onLog?.(msg);
     };
-    const initResult = await session.request('initialize', {
-      processId: null,
-      rootUri: pathToFileURL(opts.datapack).href,
-      workspaceFolders: [{ uri: pathToFileURL(opts.datapack).href, name: 'datapack' }],
-      capabilities: { window: { workDoneProgress: true }, textDocument: {}, workspace: { workspaceFolders: true, didChangeConfiguration: { dynamicRegistration: true }, didChangeWatchedFiles: { dynamicRegistration: true } } },
-      initializationOptions: { defaultConfig: { env: { gameVersion: opts.version } } },
-      locale: 'en',
-    }) as { serverInfo?: { name?: string; version?: string } } | undefined;
-    opts.onLog?.(`[check] server: ${initResult?.serverInfo?.name ?? '?'} ${initResult?.serverInfo?.version ?? ''}`.trim());
-    session.notify('initialized', {});
-    await session.waitReady(180000);
-    return session;
+    try {
+      const initResult = await session.request('initialize', {
+        processId: null,
+        rootUri: pathToFileURL(opts.datapack).href,
+        workspaceFolders: [{ uri: pathToFileURL(opts.datapack).href, name: 'datapack' }],
+        capabilities: { window: { workDoneProgress: true }, textDocument: {}, workspace: { workspaceFolders: true, didChangeConfiguration: { dynamicRegistration: true }, didChangeWatchedFiles: { dynamicRegistration: true } } },
+        initializationOptions: { defaultConfig: { env: { gameVersion: opts.version } } },
+        locale: 'en',
+      }) as { serverInfo?: { name?: string; version?: string } } | undefined;
+      opts.onLog?.(`[check] server: ${initResult?.serverInfo?.name ?? '?'} ${initResult?.serverInfo?.version ?? ''}`.trim());
+      session.notify('initialized', {});
+      await session.waitReady(180000);
+      return session;
+    } catch (err) {
+      // boot() spawned the child in the LspSession constructor; tear it down so a failed
+      // initialize / waitReady doesn't leak a live child that holds the process open.
+      session.close();
+      throw err;
+    }
   }
 
   function resolveVersion(session: LspSession): string | null {
@@ -287,7 +294,11 @@ export function createLspEngine(): CheckEngine {
           if (ds) diagnosticsByRel.set(rel, ds);
         }
         const failedRels = new Set<string>();
-        for (const [uri, rel] of uriToRel) if (session.isFailed(uri)) failedRels.add(rel);
+        for (const [uri, rel] of uriToRel) {
+          // A file with no diagnostics AND no failure (e.g. one the server excluded) is
+          // reported as failed, matching the inproc engine's "never emitted documentErrored".
+          if (session.isFailed(uri) || !session.getDiagnostics(uri)) failedRels.add(rel);
+        }
 
         return { resolvedVersion: resolveVersion(session), diagnosticsByRel, failedRels };
       } finally {

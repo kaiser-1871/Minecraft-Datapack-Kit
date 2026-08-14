@@ -25,7 +25,7 @@ test('evaluation scenario: removed knockback in a macro line is flagged', () => 
   const r = scan('$execute as $(source) run effect give $(target) minecraft:knockback 1 1\n');
   assert.equal(r.issues.length, 1);
   assert.equal(r.issues[0].line, 1);
-  assert.equal(r.issues[0].key, '宏行注册表');
+  assert.equal(r.issues[0].key, 'macro-registry');
   assert.ok(r.issues[0].msg.includes('minecraft:knockback'));
   assert.ok(r.issues[0].msg.includes('mob_effect'));
   assert.equal(r.checked, 1);

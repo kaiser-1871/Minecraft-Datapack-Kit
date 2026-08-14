@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { issueSig, loadBaseline, saveBaseline } from '../../dist/delta.js';
@@ -47,6 +47,24 @@ test('baseline saved under resolved version is found, old raw-specifier key migr
     const fileB = join(dir, 'b.json');
     saveBaseline(fileB, { datapack: 'DP', version: 'auto', files: { 'b.mcfunction': { sig: '2:y' } } });
     assert.deepEqual(loadBaseline(fileB, 'DP', '26.2', 'auto'), { 'b.mcfunction': { sig: '2:y' } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('saveBaseline migrates a legacy single-entry store to multi-entry form', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dpkit-delta-'));
+  const file = join(dir, 'b.json');
+  try {
+    // legacy single-entry shape (top-level datapack/version/files)
+    writeFileSync(file, JSON.stringify({ datapack: 'DP', version: '26.2', files: { 'old.mcfunction': { sig: '1:x' } } }));
+    saveBaseline(file, { datapack: 'DP', version: '26.2', files: { 'new.mcfunction': { sig: '2:y' } } });
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(raw.schema, 2);
+    assert.equal(raw.datapack, undefined);
+    assert.equal(raw.version, undefined);
+    assert.equal(raw.files, undefined);
+    assert.deepEqual(raw.baselines['DP@@26.2'].files, { 'new.mcfunction': { sig: '2:y' } });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

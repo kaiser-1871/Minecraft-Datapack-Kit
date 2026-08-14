@@ -41,7 +41,8 @@ export function detectDefaultDatapack(wantVersion: string, extraRoot?: string): 
     }
   }
   if (!found.length) return null;
-  // 优先与检查版本同目录的包(避免探到旧版本的其它存档),否则取最近改动的
+  // Prefer the pack under the directory matching the check version (avoids probing other
+  // saves from older versions), else the most recently modified one.
   const byVer = found.filter(x => x.version === wantVersion || wantVersion.startsWith(x.version));
   const pool = byVer.length ? byVer : found;
   let best: string | null = null, bestM = -1;

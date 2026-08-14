@@ -24,7 +24,7 @@ export const BUILTIN_IGNORE_DESC = 'Unknown key "LastHurtMob" (missing from Spyg
 export function isVanillaRegistryMiss(
   msg: string,
   registries: Record<string, string[]>,
-  vanillaTags?: Set<string> | null,
+  vanillaTags?: Set<string> | null | (() => Set<string> | null),
 ): boolean {
   // Real messages carry a trailing " (rule: undeclaredSymbol)" suffix, so no end anchor.
   const m = msg.match(/^Cannot find (\S+) [“"]([^”"]+)[”"]/);
@@ -32,13 +32,16 @@ export function isVanillaRegistryMiss(
   const category = m[1];
   const id = m[2];
   if (id.startsWith('#')) return false;
-  // vanilla tag reference: category is "tag/<registry>"
+  // vanilla tag reference: category is "tag/<registry>". The tag set is only resolved
+  // (and the vanilla-data tarball only decompressed) once a tag-miss diagnostic actually
+  // appears — packs without tag misses pay nothing.
   if (category.startsWith('tag/')) {
-    if (!vanillaTags) return false;
+    const tags = typeof vanillaTags === 'function' ? vanillaTags() : vanillaTags;
+    if (!tags) return false;
     const reg = category.slice('tag/'.length);
     if (!id.startsWith('minecraft:')) return false;
     const tag = id.slice('minecraft:'.length);
-    return vanillaTags.has(`${reg}/${tag}`);
+    return tags.has(`${reg}/${tag}`);
   }
   const values = registries[category];
   if (!values) return false;

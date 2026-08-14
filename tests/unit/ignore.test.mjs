@@ -56,3 +56,16 @@ test('does not filter categories we have no registry data for', () => {
   assert.ok(!isVanillaRegistryMiss('Cannot find function “test:no_such_func”', REGS));
   assert.ok(!isVanillaRegistryMiss('Unknown key “Foo”', REGS));
 });
+
+test('tag getter is resolved lazily (only for tag-miss messages)', () => {
+  let calls = 0;
+  const getTags = () => { calls++; return new Set(['damage_type/is_projectile']); };
+  // a non-tag registry miss must not touch the (expensive) tag getter
+  assert.ok(isVanillaRegistryMiss('Cannot find attribute "minecraft:attack_speed"', REGS, getTags));
+  assert.equal(calls, 0);
+  // a tag miss resolves it exactly once and matches
+  assert.ok(isVanillaRegistryMiss('Cannot find tag/damage_type "minecraft:is_projectile"', REGS, getTags));
+  assert.equal(calls, 1);
+  // a null getter (or null set) disables tag filtering
+  assert.ok(!isVanillaRegistryMiss('Cannot find tag/damage_type "minecraft:is_projectile"', REGS, null));
+});

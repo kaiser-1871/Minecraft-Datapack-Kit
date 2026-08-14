@@ -1,6 +1,7 @@
-// logcheck.ts — 游戏日志自检(best-effort):reload 新鲜度 + 数据包加载错误。
-// 完全通用:日志路径从数据包自身的 versions 段 / 配置的 minecraftRoot / %APPDATA% 推导,
-// 错误行过滤按数据包自己 data/ 下的命名空间匹配,不再写死任何机器或包名。
+// logcheck.ts — game-log self-check (best-effort): reload freshness + datapack load errors.
+// Fully generic: the log path is derived from the datapack's own versions segment / the
+// configured minecraftRoot / %APPDATA%, and error-line filtering matches namespaces under the
+// datapack's own data/ — nothing machine- or pack-specific is hard-coded.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GameLogReport } from './types.js';
@@ -39,7 +40,7 @@ export function gameLogReport(datapack: string, files: string[], minecraftRoot?:
   const stale = packNewest > logMtime;
   const lastLoaded = [...text.matchAll(/Loaded (\d+) advancements/g)].pop();
   const errRe = /(Failed to load|Couldn't parse|Unknown (function|advancement|tag|predicate|item|recipe)|Invalid|Unexpected|Failed to read|Parse error)/i;
-  // 相关性:该包自己的命名空间 + 通用关键词(无命名空间时只留通用词)
+  // Relevance: the pack's own namespaces + generic keywords (only generic words when no namespace)
   const nss = packNamespaces(datapack).map(n => n.replace(/[|\\^$+?.()[\]{}]/g, '\\$&')).join('|');
   const alternatives = [];
   if (nss) alternatives.push(`(?:${nss}):`);

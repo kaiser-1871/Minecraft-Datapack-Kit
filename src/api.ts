@@ -163,7 +163,7 @@ export async function checkDatapack(opts: CheckOptions): Promise<CheckResult> {
   const mcmetaPath = join(opts.datapack, 'pack.mcmeta');
   const mcmetaRel = existsSync(mcmetaPath) && !rels.includes('pack.mcmeta') ? 'pack.mcmeta' : null;
   if (mcmetaRel) { files.push(mcmetaPath); rels.push(mcmetaRel); }
-  opts.onLog?.(`[check] datapack=${opts.datapack}${opts.datapackSource ? `  (from ${opts.datapackSource})` : ''}  version=${opts.version}  files=${files.length}`);
+  opts.onLog?.(`[check] datapack=${opts.datapack}${opts.datapackSource ? `  (${({ cli: 'from --datapack', env: 'from DPKIT_DATAPACK', config: 'from .dpkit.json', auto: 'from auto-detected' })[opts.datapackSource]})` : ''}  version=${opts.version}  files=${files.length}`);
 
   let engine: CheckEngine;
   let externalEngine = false;

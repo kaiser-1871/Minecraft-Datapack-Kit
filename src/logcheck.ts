@@ -20,8 +20,8 @@ function findGameLog(datapack: string, minecraftRoot?: string): string | null {
   const cand: string[] = [];
   const vi = parts.findIndex(p => p === 'versions');
   if (vi >= 0) {
-    cand.push(join(parts.slice(0, vi + 2).join('\\'), 'logs', 'latest.log')); // <install>\versions\<ver>\logs
-    cand.push(join(parts.slice(0, vi).join('\\'), 'logs', 'latest.log'));     // <install>\logs
+    cand.push(join(...parts.slice(0, vi + 2), 'logs', 'latest.log')); // <install>\versions\<ver>\logs
+    cand.push(join(...parts.slice(0, vi), 'logs', 'latest.log'));     // <install>\logs
   }
   if (minecraftRoot) cand.push(join(minecraftRoot, 'logs', 'latest.log'));
   cand.push(join(process.env.APPDATA ?? '', '.minecraft', 'logs', 'latest.log'));

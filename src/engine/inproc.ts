@@ -171,6 +171,19 @@ interface PoolEntry {
   current: Map<string, RawDiagnostic[]>;
   /** Per-URI TextDocument version counter for onDidOpen (must increment monotonically). */
   docVersions: Map<string, number>;
+  /** Serializes check/complete/updateFile ops on this entry. MCP's tools/call handler does
+   * not serialize concurrent calls, so overlapping ops on one `datapack@@version` entry would
+   * otherwise race on the shared uriToRel/current slots and the open documents. */
+  opQueue: Promise<unknown>;
+}
+
+/** Chain `op` onto the entry's op queue so concurrent ops on one entry run one at a time.
+ * The queue promise itself never rejects (a failed op still rejects the caller's returned
+ * promise), so one failed call can't wedge every later call on the entry. */
+function enqueue<T>(entry: PoolEntry, op: () => Promise<T>): Promise<T> {
+  const run = entry.opQueue.then(op);
+  entry.opQueue = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 /** A pooled in-process engine: reuses one Service per `datapack@@version` across calls,
@@ -188,7 +201,7 @@ export function createInProcEnginePool(): CheckEngine {
 
     const logger = new RecordingLogger();
     const service = makeService(datapack, version, logger, noGotchas);
-    const entry: PoolEntry = { service, logger, uriToRel: new Map(), current: new Map(), docVersions: new Map() };
+    const entry: PoolEntry = { service, logger, uriToRel: new Map(), current: new Map(), docVersions: new Map(), opQueue: Promise.resolve() };
 
     // One persistent listener per entry — it always writes into `entry.current` (which the
     // caller swaps out per check), so listeners never accumulate across checks.
@@ -228,33 +241,39 @@ export function createInProcEnginePool(): CheckEngine {
     async check(opts: EngineCheckOptions): Promise<EngineCheckResult> {
       const { datapack, version, files, rels } = opts;
       const entry = await acquire(datapack, version, opts.noGotchas === true);
+      // Serialize against other concurrent ops on this entry: MCP does not serialize
+      // tools/call, and two overlapping checks would otherwise swap uriToRel/current out
+      // from under each other's documentErrored listener.
+      return enqueue(entry, async () => {
+        const uriToRel = new Map<string, string>();
+        for (let i = 0; i < files.length; i++) uriToRel.set(core.normalizeUri(pathToFileURL(files[i]).href), rels[i]);
+        const diagnosticsByRel = new Map<string, RawDiagnostic[]>();
+        entry.uriToRel = uriToRel;
+        entry.current = diagnosticsByRel;
+        last = entry;
 
-      const uriToRel = new Map<string, string>();
-      for (let i = 0; i < files.length; i++) uriToRel.set(core.normalizeUri(pathToFileURL(files[i]).href), rels[i]);
-      const diagnosticsByRel = new Map<string, RawDiagnostic[]>();
-      entry.uriToRel = uriToRel;
-      entry.current = diagnosticsByRel;
-      last = entry;
+        await entry.service.project.analyzeProject();
 
-      await entry.service.project.analyzeProject();
+        const failedRels = new Set<string>();
+        for (const rel of rels) if (!diagnosticsByRel.has(rel)) failedRels.add(rel);
 
-      const failedRels = new Set<string>();
-      for (const rel of rels) if (!diagnosticsByRel.has(rel)) failedRels.add(rel);
-
-      const resolvedVersion = entry.service.project.ctx.loadedVersion ?? resolvedVersionOf(entry.logger);
-      return { resolvedVersion, diagnosticsByRel, failedRels };
+        const resolvedVersion = entry.service.project.ctx.loadedVersion ?? resolvedVersionOf(entry.logger);
+        return { resolvedVersion, diagnosticsByRel, failedRels };
+      });
     },
 
     async complete(opts: EngineCompleteOptions): Promise<CompletionItemDTO[]> {
       const { datapack, version, file, line, column } = opts;
       const entry = await acquire(datapack, version, false);
-      const nUri = core.normalizeUri(pathToFileURL(file).href);
-      const languageId = file.endsWith('.mcfunction') ? 'mcfunction' : 'json';
-      await entry.service.project.onDidOpen(nUri, languageId, 1, opts.text ?? readFileSync(file, 'utf8'));
-      const dand = await entry.service.project.ensureClientManagedChecked(nUri);
-      if (!dand) return [];
-      const offset = dand.doc.offsetAt({ line: line - 1, character: column - 1 });
-      return completionItemsOf(entry.service.complete(dand.node, dand.doc, offset));
+      return enqueue(entry, async () => {
+        const nUri = core.normalizeUri(pathToFileURL(file).href);
+        const languageId = file.endsWith('.mcfunction') ? 'mcfunction' : 'json';
+        await entry.service.project.onDidOpen(nUri, languageId, 1, opts.text ?? readFileSync(file, 'utf8'));
+        const dand = await entry.service.project.ensureClientManagedChecked(nUri);
+        if (!dand) return [];
+        const offset = dand.doc.offsetAt({ line: line - 1, character: column - 1 });
+        return completionItemsOf(entry.service.complete(dand.node, dand.doc, offset));
+      });
     },
 
     /** Incremental update: re-open ONE changed file with fresh text. onDidOpen re-parses,
@@ -263,18 +282,27 @@ export function createInProcEnginePool(): CheckEngine {
      * after a check() call. */
     async updateFile(opts: { rel: string; file: string; text: string }): Promise<void> {
       if (!last) throw new Error('[dpkit] updateFile() before any check()');
-      const nUri = core.normalizeUri(pathToFileURL(opts.file).href);
-      const languageId = opts.file.endsWith('.mcfunction') ? 'mcfunction' : 'json';
-      const next = (last.docVersions.get(nUri) ?? 0) + 1;
-      last.docVersions.set(nUri, next);
-      await last.service.project.onDidOpen(nUri, languageId, next, opts.text);
-      // onDidOpen alone does NOT emit documentUpdated in the new core; ensureClientManagedChecked
-      // does (which fans out to documentErrored and refreshes the entry's diagnostics).
-      await last.service.project.ensureClientManagedChecked(nUri);
+      // Watch path only (CLI --watch): it runs check → updateFile → snapshot sequentially on a
+      // single entry, so `last` is stable here. Still queue the update so the version counter
+      // and re-bind stay serialized with any check() on the same entry.
+      const entry = last;
+      await enqueue(entry, async () => {
+        const nUri = core.normalizeUri(pathToFileURL(opts.file).href);
+        const languageId = opts.file.endsWith('.mcfunction') ? 'mcfunction' : 'json';
+        const next = (entry.docVersions.get(nUri) ?? 0) + 1;
+        entry.docVersions.set(nUri, next);
+        await entry.service.project.onDidOpen(nUri, languageId, next, opts.text);
+        // onDidOpen alone does NOT emit documentUpdated in the new core; ensureClientManagedChecked
+        // does (which fans out to documentErrored and refreshes the entry's diagnostics).
+        await entry.service.project.ensureClientManagedChecked(nUri);
+      });
     },
 
     snapshot(): EngineSnapshot {
       // Called after a check/updateFile burst; returns the pool's live diagnostics map.
+      // Synchronous and queue-free on purpose: the watch loop awaits each queued
+      // check()/updateFile() before calling snapshot(), so `last.current` is already a
+      // consistent snapshot — no concurrent op can be mid-swap here.
       if (!last) return { diagnosticsByRel: new Map(), resolvedVersion: null };
       return {
         diagnosticsByRel: last.current,
@@ -283,9 +311,15 @@ export function createInProcEnginePool(): CheckEngine {
     },
 
     async close(): Promise<void> {
+      // Close each entry behind its op queue so a still-running check/complete/updateFile
+      // finishes before we tear its Service down.
+      const closers: Promise<void>[] = [];
       for (const entry of entries.values()) {
-        try { await entry.service.project.close(); } catch { /* ignore */ }
+        closers.push(enqueue(entry, async () => {
+          try { await entry.service.project.close(); } catch { /* ignore */ }
+        }));
       }
+      await Promise.all(closers);
       entries.clear();
     },
   };

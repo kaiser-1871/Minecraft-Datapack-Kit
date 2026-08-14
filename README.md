@@ -57,7 +57,7 @@ node dpkit.mjs --versions                        # list available game versions 
 node dpkit.mjs --help                            # all options
 ```
 
-`--json` adds `engine` (`inproc`/`lsp`) and `schemaVersion` (currently `1`) to the existing shape.
+`--json` adds `engine` (`inproc`/`lsp`/`pool`) and `schemaVersion` (currently `1`) to the existing shape.
 
 Exit codes: `0` no errors · `1` errors/internal failure · `2` environment/network failure · `4` usage/configuration error.
 Ignored false positives do not count toward the exit code.
@@ -183,8 +183,8 @@ await completeAt({ datapack, version, rel, line, column });        // → comple
 ## Build & test
 
 ```bash
-npm run build        # tsc → dist/
-npm test             # 68 regression tests (unit + fixture integration + MCP smoke)
+npm run build        # tsc --emitDeclarationOnly + esbuild bundle → dist/
+npm test             # regression tests (unit + fixture integration + CLI smoke + MCP smoke)
 npm run parity       # inproc vs LSP per-file issueSig comparison (correctness gate; fixture by default)
 npm run test:all     # npm test + parity (full gate)
 npm run mcp          # start the MCP server

@@ -1,13 +1,18 @@
-// cache.ts — shared access to Spyglass's local HTTP cache (%LOCALAPPDATA%\spyglassmc-nodejs\Cache).
+// cache.ts — shared access to Spyglass's local HTTP cache (envPaths('spyglassmc').cache;
+// %LOCALAPPDATA%\spyglassmc-nodejs\Cache on Windows).
 // One place for the cache dir, the index.json read (memoized by index mtime so the engine's
 // refresh during a check invalidates it), and object/bytes reads keyed by URL→sha1. Previously
 // this logic was copy-pasted across syntax.ts, registry.ts, and vanilla-tags.ts with the
 // drift-prone "memo on the index mtime" invariant maintained in three places.
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import envPaths from 'env-paths';
 
+/** The engine's own cache root — identical to what makeService() in engine/inproc.ts
+ * configures via envPaths('spyglassmc').cache, so post-scan cache reads (macro / entity-NBT /
+ * vanilla-tags) never silently fall back to a relative path when %LOCALAPPDATA% is unset. */
 export function cacheDir(): string {
-  return join(process.env.LOCALAPPDATA ?? '', 'spyglassmc-nodejs', 'Cache');
+  return envPaths('spyglassmc').cache;
 }
 
 export function cacheIndexPath(): string {

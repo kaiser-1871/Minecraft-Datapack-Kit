@@ -25,7 +25,7 @@ no external Spyglass checkout and no network. To refresh the engine from a sourc
 `npm run vendor -- --spyglass=<path>` (rebuilds with `npx tsgo -b packages`, re-syncs
 `vendor/spyglass/`, refreshes `BUILD.json`), then `npm install`. `node dpkit.mjs --check-updates`
 reports whether Spyglass's GitHub `main` has moved since the engine was vendored.
-Regression tests: `npm test` (unit + fixture integration + MCP smoke); perf baseline: `npm run bench`; correctness gate:
+Regression tests: `npm test` (unit + fixture integration + CLI smoke + MCP smoke); perf baseline: `npm run bench`; correctness gate:
 `npm run parity` (inproc vs LSP per-file issueSig equality, defaults to the self-contained
 fixture, `DPKIT_PARITY_DATAPACK` can point at a real pack); `npm run test:all` = test + parity.
 Key in-process-engine gotcha: projectRoot must go through `core.normalizeUri` (lowercases the
@@ -78,7 +78,8 @@ node dpkit.mjs --datapack=D:\other-pack --version=1.21.4 # check any other datap
   (0 diagnostics); now it reports a parse error.
 - Known false positives `Unknown key "LastHurtMob"` and `Cannot find <reg> "minecraft:<valid-id>"`
   (vanilla registry not declared in the pack) are auto-filtered; `--no-ignore` shows raw diagnostics.
-- Exit codes: 0 = no errors, 1 = errors (or warnings with `--strict`), 2 = environment/network failure.
+- Exit codes: 0 = no errors, 1 = errors (including internal failures; warnings also count with
+  `--strict`), 2 = environment/network failure, 4 = usage/configuration error.
 
 ## Config (.dpkit.json)
 

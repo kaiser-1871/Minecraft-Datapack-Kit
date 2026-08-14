@@ -28,10 +28,11 @@ export async function main(): Promise<void> {
   const pooledEngine = api.createInProcEnginePool();
   const pickEngine = (e?: 'inproc' | 'lsp' | 'pool') => (e === 'inproc' || e === 'lsp' ? e : pooledEngine);
 
+  // Empty-string env vars mean "unset" (same rule as the CLI): '' must not beat the config.
   const defaultDatapack = (version: string): string =>
-    process.env.DPKIT_DATAPACK ?? cfg.datapack ?? detectDefaultDatapack(version, cfg.minecraftRoot)
+    (process.env.DPKIT_DATAPACK?.trim() || undefined) ?? cfg.datapack ?? detectDefaultDatapack(version, cfg.minecraftRoot)
     ?? '';
-  const ver = (v?: string): string => v ?? process.env.DPKIT_VERSION ?? cfg.version ?? DEFAULT_VERSION;
+  const ver = (v?: string): string => v ?? (process.env.DPKIT_VERSION?.trim() || undefined) ?? cfg.version ?? DEFAULT_VERSION;
 
   const server = new McpServer({
     name: 'dpkit',

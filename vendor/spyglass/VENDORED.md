@@ -8,9 +8,10 @@ engine runs on. dpkit is fully self-contained: it does not need the Spyglass sou
 
 - Upstream: [SpyglassMC/Spyglass](https://github.com/SpyglassMC/Spyglass) (MIT License,
   © SPGoding and contributors — see ./LICENSE).
-- Built from a local checkout at `D:\Spyglass-main` (a plain source copy without `.git`,
-  so its exact upstream commit is unknown; it does **not** byte-match GitHub `main` HEAD as
-  of the vendor date — see BUILD.json).
+- Built from a local checkout at `D:\Spyglass-main`. The upstream commit recorded at
+  vendor time is `7a8d035b8247fd3539c5e9a81ba4c9552a873c34` (see BUILD.json
+  `spyglassMainAtVendor.sha`); the checkout did **not** byte-match GitHub `main` HEAD as of
+  the vendor date (`sourceMatchesMainHead: false`).
 - Build command (run in the checkout): `npx tsgo -b packages`
   (tsgo 7.0.0-dev.20260511.1, Node >= 22.15).
 - Each package ships `lib/` (JavaScript + `.d.ts`, source maps excluded) and its

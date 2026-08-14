@@ -11,13 +11,15 @@
   "files": [
     "dist",
     "dpkit.mjs",
-    "vendor",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md",
+    "vendor/spyglass/BUILD.json",
+    "!dist/**/*.map"
   ],
   "scripts": {
-    "build": "tsc",
-    "build:watch": "tsc --watch",
+    "build": "tsc --emitDeclarationOnly && node scripts/build-bundle.mjs",
+    "build:watch": "tsc --emitDeclarationOnly --watch",
     "test": "npm run build && node --test \"tests/**/*.test.mjs\" && node tests/mcp-smoke.mjs",
     "test:all": "npm test && npm run parity",
     "mcp": "node dist/mcp.js",
@@ -35,9 +37,13 @@
     "mcp",
     "linter"
   ],
-  "author": "",
+  "author": "dpkit contributors",
   "license": "ISC",
-  "dependencies": {
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@spyglassmc/core": "file:vendor/spyglass/core",
     "@spyglassmc/java-edition": "file:vendor/spyglass/java-edition",
@@ -51,8 +57,7 @@
     "vscode-languageserver-textdocument": "^1.0.12",
     "zod": "^4.4.3"
   },
-  "devDependencies": {
-    "@types/node": "^26.2.0",
-    "typescript": "^7.0.2"
+  "engines": {
+    "node": ">=20"
   }
 }

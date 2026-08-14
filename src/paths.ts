@@ -7,7 +7,7 @@ import { join } from 'node:path';
 export const ROOT_DIR = fileURLToPath(new URL('../', import.meta.url));
 
 /** The Spyglass LSP server entry (used by the --engine=lsp fallback). */
-export const SERVER = join(ROOT_DIR, 'node_modules', '@spyglassmc', 'language-server', 'bin', 'server.js');
+export const SERVER = join(ROOT_DIR, 'dist', 'spyglass-server.js');
 
 /** Baseline file for --delta. */
 export const BASELINE_FILE = join(ROOT_DIR, '.dpkit-baseline.json');

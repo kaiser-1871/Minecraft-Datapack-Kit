@@ -63,15 +63,23 @@ const { values: V } = (() => {
 let cfg: DpkitConfig = {};
 let cfgPath: string | null = null;
 try { const loaded = loadConfig(V.config); cfg = loaded.config; cfgPath = loaded.path; }
-catch (err) { console.error((err as Error).message); process.exit(4); }
-const cfgVersion = process.env.DPKIT_VERSION ?? cfg.version;
-const cfgDatapack = process.env.DPKIT_DATAPACK ?? cfg.datapack;
+catch (err) {
+  // --help only prints usage: a broken/missing config must not make it fail (or exit non-zero).
+  if (V.help === true) { cfg = {}; cfgPath = null; }
+  else { console.error((err as Error).message); process.exit(4); }
+}
+// Empty-string env vars mean "unset" (CI shells often export them empty); plain ?? would
+// let '' win over the config and produce a bogus empty version/datapack down the line.
+const dpkitVersionEnv = process.env.DPKIT_VERSION?.trim() || undefined;
+const dpkitDatapackEnv = process.env.DPKIT_DATAPACK?.trim() || undefined;
+const cfgVersion = dpkitVersionEnv ?? cfg.version;
+const cfgDatapack = dpkitDatapackEnv ?? cfg.datapack;
 
 // ---- flags (CLI flag > env/config > default) ----
 const GAME_VERSION = V.version ?? cfgVersion ?? DEFAULT_VERSION; // 'auto'(default) | 'latest release' | '1.21.4' ...
 let DP_SOURCE: 'cli' | 'env' | 'config' | 'auto' =
   V.datapack !== undefined ? 'cli'
-  : process.env.DPKIT_DATAPACK !== undefined ? 'env'
+  : dpkitDatapackEnv !== undefined ? 'env'
   : cfg.datapack !== undefined ? 'config'
   : 'auto';
 let DATAPACK: string | null = V.datapack ?? cfgDatapack ?? detectDefaultDatapack(GAME_VERSION, cfg.minecraftRoot);
@@ -79,8 +87,18 @@ let DATAPACK: string | null = V.datapack ?? cfgDatapack ?? detectDefaultDatapack
 // #2: never silently check a stale/pointed-elsewhere datapack. A dead config/env path used to
 // either fail late or (worse) make a green report for the WRONG pack. Warn loudly, fall back to
 // auto-detection, and flag a home-dir config that points away from the more-relevant detected pack.
+// Offline teach modes (--syntax/--registry/--versions/--dump/--dump-all) read only the local
+// cache, --check-updates compares the vendored engine, and --complete-inline completes a raw
+// string — none operates on the configured datapack, so a stale/missing-datapack warning is
+// noise for them (and --help must stay clean too).
+const datapackNeeded = !(
+  V.help === true ||
+  V.syntax !== undefined || V.dump !== undefined || V['dump-all'] === true ||
+  V.registry !== undefined || V.versions === true || V['check-updates'] === true ||
+  V['complete-inline'] !== undefined
+);
 const samePath = (a: string, b: string): boolean => a.toLowerCase().replace(/\\/g, '/') === b.toLowerCase().replace(/\\/g, '/');
-if (DP_SOURCE === 'config' || DP_SOURCE === 'env') {
+if (datapackNeeded && (DP_SOURCE === 'config' || DP_SOURCE === 'env')) {
   const auto = detectDefaultDatapack(GAME_VERSION, cfg.minecraftRoot);
   if (DATAPACK && !existsSync(DATAPACK)) {
     const from = DP_SOURCE === 'env' ? 'DPKIT_DATAPACK' : (cfgPath ?? '.dpkit.json');
@@ -208,9 +226,31 @@ Exit codes: 0 = no errors, 1 = errors / internal failures (or warnings, with --s
 2 = environment / network failure, 4 = usage / configuration error.`);
 }
 
+/**
+ * Warn when --version pins to a string that isn't a known version id. The engine then silently
+ * resolves it to the latest snapshot (the report's "server resolved" line shows it), which has
+ * surprised users. Uses the cached /mcje/versions list (the same full list --versions prints),
+ * so this is offline and instant; when the list isn't cached we stay silent rather than guess.
+ * Offline cache commands already fail loudly on a bad version themselves, and --check-updates
+ * ignores the version, so only the engine-backed paths (check / complete / watch) warn here.
+ */
+function warnUnrecognizedVersion(): void {
+  if (OFFLINE || CHECK_UPDATES) return;
+  // '' = the env var / config slot was empty (unset), not a pin — nothing to warn about.
+  if (!GAME_VERSION || ['auto', 'latest release', 'latest snapshot'].includes(GAME_VERSION)) return;
+  const cached = loadCachedVersions();
+  if (!Array.isArray(cached) || cached.length === 0) return;
+  const entries = cached as Array<{ type?: string; id?: string }>;
+  const known = new Set(entries.map(e => e.id).filter((x): x is string => typeof x === 'string'));
+  if (known.has(GAME_VERSION)) return;
+  const fallback = entries.find(e => e.type === 'snapshot')?.id ?? entries[0]?.id ?? 'unknown';
+  console.error(`⚠ [check] version '${GAME_VERSION}' not recognized — falling back to latest snapshot (${fallback}); see --versions`);
+}
+
 export async function main(): Promise<void> {
   try {
     if (HELP) { printHelp(); return; }
+    warnUnrecognizedVersion();
     if (OFFLINE) { await runOffline(); return; }
     if (COMPLETE) { await runComplete(); return; }
     if (COMPLETE_INLINE_GIVEN) { await runCompleteInline(); return; }
@@ -238,16 +278,23 @@ async function runOffline(): Promise<void> {
 
   if (REGISTRY_GIVEN) {
     if (!REGISTRY.trim()) throw new api.DpkitError('[check] --registry needs a registry name, e.g. --registry=mob_effect (use --registry=? to list all available registries)', api.EXIT_USAGE);
+    // '?' is the documented "list every registry" query — a successful answer, not a miss,
+    // so it exits 0 (an unknown registry name still exits 1 to stay CI-friendly).
+    const isList = REGISTRY === '?';
     const r = api.queryRegistry(REGISTRY, GAME_VERSION);
     if (JSON_OUT) {
       console.log(JSON.stringify(r, null, 2));
-      if (!r.found) process.exitCode = 1;
+      if (!r.found && !(isList && r.cached)) process.exitCode = 1;
       return;
     }
     if (!r.found) {
-      process.exitCode = 1;
+      const listOk = isList && r.cached;
+      if (!listOk) process.exitCode = 1;
       if (!r.cached) {
-        out(`registry data for version ${r.version} is not cached yet, so '${r.name}' cannot be judged. Run node dpkit.mjs --version="${r.version}" online once to download it.`);
+        out(`registry data for version ${r.version} is not cached yet, so ${isList ? 'no registry index can be listed' : `'${r.name}' cannot be judged`}. Run node dpkit.mjs --version="${r.version}" online once to download it.`);
+      } else if (isList) {
+        out(`available registries for ${r.version} (${r.index?.length ?? 0}):`);
+        for (const x of r.index ?? []) out(`  ${String(x.name).padEnd(40)} ${x.count} entries`);
       } else {
         out(`registry '${r.name}' is not in version ${r.version}'s registry data. Available registries (${r.index?.length ?? 0}):`);
         for (const x of r.index ?? []) out(`  ${String(x.name).padEnd(40)} ${x.count} entries`);
@@ -308,7 +355,7 @@ async function printVersions(): Promise<void> {
   for (const r of v.recent) out(`    ${String(r.id).padEnd(18)} ${String(r.type).padEnd(8)} dpv ${String(r.dpv).padEnd(4)} ${r.hasData ? '✓' : '—'}`);
   if (v.count > v.recent.length) out(`    …(${v.count} total, showing the latest ${v.recent.length})`);
   out(`\n  tip: new commands/subcommands/registry values/NBT fields are all data-driven; run --version=<new> online once to download them automatically.`);
-  out(`       only a brand-new parameter type or a major command-format change requires npm update @spyglassmc/language-server first.`);
+  out(`       only a brand-new parameter type or a major command-format change requires re-vendoring the engine: npm run vendor -- --spyglass=<updated-checkout>, then npm install.`);
 }
 
 /** Engine freshness check: compares the vendored Spyglass build record with GitHub main. */
@@ -523,7 +570,7 @@ function renderText(result: api.CheckResult): void {
     ? report.datapackSource === 'cli' ? 'from --datapack'
     : report.datapackSource === 'env' ? 'from DPKIT_DATAPACK'
     : report.datapackSource === 'config' ? 'from .dpkit.json'
-    : 'auto-detected'
+    : 'from auto-detected'
     : null;
   console.log(`\n———— CHECK REPORT ————`);
   console.log(`datapack : ${report.datapack}${sourceLabel ? `   (${sourceLabel})` : ''}`);

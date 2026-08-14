@@ -105,7 +105,9 @@ and the report header prints where the datapack came from (`from --datapack` / `
   `version` / built-in default `auto` (`DEFAULT_VERSION` in `src/config.ts`). `auto` reads the
   pack's pack.mcmeta, pinning nothing; but packs with `min_format`/`max_format` get detected as a
   newer version — pin the version in config/args when you need to fix it. Offline syntax/gotcha
-  scans (`--syntax`/`--dump`) default to the latest release in the local cache.
+  scans (`--syntax`/`--dump`) default to the latest release in the local cache, and now
+  auto-download missing per-version data when online (`--cache-versions=a,b` pre-warms a set;
+  `--versions --uncached` lists what's missing; all in `src/version-data.ts`).
 - **Upgrading to a new version**: command tree/registry/NBT schema are all data-driven; run
   `node dpkit.mjs --version=<new>` online to auto-download and recognize it; `--versions` lists
   available versions. `--version="latest release"` always follows the latest release. A hint at the

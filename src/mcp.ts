@@ -12,6 +12,7 @@ import { z } from 'zod';
 import * as api from './api.js';
 import { DEFAULT_VERSION, loadConfig } from './config.js';
 import { detectDefaultDatapack } from './datapack-discovery.js';
+import { ensureVersionData } from './version-data.js';
 
 const errorText = (e: unknown): { content: { type: 'text'; text: string }[]; isError: true } => ({
   content: [{ type: 'text', text: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }) }],
@@ -91,7 +92,8 @@ export async function main(): Promise<void> {
     },
   }, async (args) => {
     try {
-      const r = api.querySyntax(args.path, ver(args.version), args.depth ?? 4);
+      const version = await ensureVersionData(ver(args.version), ['commands']);
+      const r = api.querySyntax(args.path, version, args.depth ?? 4);
       return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
     } catch (e) {
       return errorText(e);
@@ -139,7 +141,8 @@ export async function main(): Promise<void> {
     },
   }, async (args) => {
     try {
-      const r = api.queryRegistry(args.registry, ver(args.version));
+      const version = await ensureVersionData(ver(args.version), ['registries']);
+      const r = api.queryRegistry(args.registry, version);
       return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
     } catch (e) {
       return errorText(e);

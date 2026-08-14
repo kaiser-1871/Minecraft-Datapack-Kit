@@ -15,6 +15,7 @@ import { DEFAULT_VERSION, loadConfig } from './config.js';
 import type { DpkitConfig } from './config.js';
 import { BUILTIN_IGNORE_DESC } from './ignore.js';
 import { cachedCommandVersions, CommandDataNotCachedError, loadCachedVersions } from './syntax.js';
+import { downloadToCache, ensureVersionData, VERSIONS_LIST_URL } from './version-data.js';
 import * as api from './api.js';
 
 // ---- parse CLI args (util.parseArgs: --name=value or --name value, --no-*, repeatable --ignore) ----
@@ -48,6 +49,8 @@ const { values: V } = (() => {
         help: { type: 'boolean', short: 'h' },
         versions: { type: 'boolean' },
         'check-updates': { type: 'boolean' },
+        'cache-versions': { type: 'string' },
+        uncached: { type: 'boolean' },
         'dump-all': { type: 'boolean' },
         watch: { type: 'boolean' },
       },
@@ -95,7 +98,7 @@ const datapackNeeded = !(
   V.help === true ||
   V.syntax !== undefined || V.dump !== undefined || V['dump-all'] === true ||
   V.registry !== undefined || V.versions === true || V['check-updates'] === true ||
-  V['complete-inline'] !== undefined
+  V['complete-inline'] !== undefined || V['cache-versions'] !== undefined
 );
 const samePath = (a: string, b: string): boolean => a.toLowerCase().replace(/\\/g, '/') === b.toLowerCase().replace(/\\/g, '/');
 if (datapackNeeded && (DP_SOURCE === 'config' || DP_SOURCE === 'env')) {
@@ -138,6 +141,9 @@ const COMPLETE_INLINE = V['complete-inline'];   // live: complete a raw command 
 const COMPLETE_INLINE_GIVEN = V['complete-inline'] !== undefined;
 const VERSIONS = V.versions === true;
 const CHECK_UPDATES = V['check-updates'] === true; // engine (vendored Spyglass) freshness check
+const CACHE_VERSIONS = V['cache-versions'] ?? '';  // batch warm-up: --cache-versions=1.19.4,1.20.4
+const CACHE_VERSIONS_GIVEN = V['cache-versions'] !== undefined;
+const UNCACHED_ONLY = V.uncached === true;         // --versions --uncached: inverse cached view
 const STRICT = V.strict === true;               // warnings also fail the run (CI-friendly)
 const REGISTRY = V.registry ?? '';              // offline: list a registry's values for the version
 const SYNTAX_GIVEN = V.syntax !== undefined;
@@ -221,6 +227,9 @@ Teach-the-AI modes (ground-truth syntax from the ${GAME_VERSION} command tree):
                    newer release exists and which have data cached
   --check-updates  Check whether Spyglass's GitHub main has moved since the engine was
                    vendored (build it in with: npm run vendor -- --spyglass=<path>)
+  --cache-versions=<a,b,…>  Pre-download commands + registries for the listed versions
+                   (batch warm-up, e.g. --cache-versions=1.19.4,1.20.4)
+  --uncached       With --versions: list only versions whose command data is not cached
 
 Exit codes: 0 = no errors, 1 = errors / internal failures (or warnings, with --strict),
 2 = environment / network failure, 4 = usage / configuration error.`);
@@ -250,6 +259,7 @@ function warnUnrecognizedVersion(): void {
 export async function main(): Promise<void> {
   try {
     if (HELP) { printHelp(); return; }
+    if (CACHE_VERSIONS_GIVEN) { await runCacheVersions(); return; }
     warnUnrecognizedVersion();
     if (OFFLINE) { await runOffline(); return; }
     if (COMPLETE) { await runComplete(); return; }
@@ -273,6 +283,11 @@ export async function main(): Promise<void> {
 // ---------- offline syntax / dump / versions (no server, no datapack needed) ----------
 async function runOffline(): Promise<void> {
   try {
+  // Teach commands used to require a full check first to download a version's data; now the
+  // missing data (command tree / registries) is downloaded on demand — offline still fails cleanly.
+  const teachKind: 'commands' | 'registries' | null =
+    (SYNTAX_GIVEN || DUMP_GIVEN || DUMP_ALL) ? 'commands' : REGISTRY_GIVEN ? 'registries' : null;
+  const concreteVersion = teachKind ? await ensureVersionData(GAME_VERSION, [teachKind]) : GAME_VERSION;
   if (SYNTAX_GIVEN && !SYNTAX.trim()) throw new api.DpkitError('[check] --syntax needs a command path, e.g. --syntax="execute on"', api.EXIT_USAGE);
   if (DUMP_GIVEN && !DUMP) throw new api.DpkitError('[check] --dump needs an output file path, e.g. --dump=ref.md', api.EXIT_USAGE);
   if (SYNTAX_GIVEN && (DUMP_GIVEN || DUMP_ALL)) throw new api.DpkitError('[check] --syntax and --dump/--dump-all are mutually exclusive; use them separately', api.EXIT_USAGE);
@@ -282,7 +297,7 @@ async function runOffline(): Promise<void> {
     // '?' is the documented "list every registry" query — a successful answer, not a miss,
     // so it exits 0 (an unknown registry name still exits 1 to stay CI-friendly).
     const isList = REGISTRY === '?';
-    const r = api.queryRegistry(REGISTRY, GAME_VERSION);
+    const r = api.queryRegistry(REGISTRY, concreteVersion);
     if (JSON_OUT) {
       console.log(JSON.stringify(r, null, 2));
       if (!r.found && !(isList && r.cached)) process.exitCode = 1;
@@ -310,7 +325,7 @@ async function runOffline(): Promise<void> {
   if (VERSIONS) { await printVersions(); return; }
 
   if (DUMP_GIVEN || DUMP_ALL) {
-    const refVersion = api.resolveConcreteVersion(GAME_VERSION);
+    const refVersion = concreteVersion;
     const target = DUMP || join(ROOT_DIR, `command-reference-${refVersion}.md`);
     const { count, text } = api.dumpSyntax(refVersion, DEPTH);
     writeFileSync(target, `# ${refVersion} command reference (generated offline by dpkit)\n\n> Grammar from Spyglass's cached ${refVersion} command tree (${count} top-level commands).\n> Regenerate: node dpkit.mjs --dump-all [--depth=N] [--version=<v>]\n\n${text}\n`);
@@ -318,7 +333,7 @@ async function runOffline(): Promise<void> {
     return;
   }
 
-  const result = api.querySyntax(SYNTAX, GAME_VERSION, DEPTH);
+  const result = api.querySyntax(SYNTAX, concreteVersion, DEPTH);
   if (JSON_OUT) {
     console.log(JSON.stringify({ syntax: { path: result.path, version: result.version, found: result.found, lines: result.lines } }, null, 2));
   } else {
@@ -338,6 +353,7 @@ async function runOffline(): Promise<void> {
 }
 
 async function printVersions(): Promise<void> {
+  if (UNCACHED_ONLY) { await printUncachedVersions(); return; }
   const v = await api.listVersions(GAME_VERSION);
   if (JSON_OUT) {
     console.log(JSON.stringify({
@@ -367,6 +383,48 @@ async function printVersions(): Promise<void> {
   if (v.count > v.recent.length) out(`    …(${v.count} total, showing the latest ${v.recent.length})`);
   out(`\n  tip: new commands/subcommands/registry values/NBT fields are all data-driven; run --version=<new> online once to download them automatically.`);
   out(`       only a brand-new parameter type or a major command-format change requires re-vendoring the engine: npm run vendor -- --spyglass=<updated-checkout>, then npm install.`);
+}
+
+/** --versions --uncached: the inverse view — which versions still lack command data. */
+async function printUncachedVersions(): Promise<void> {
+  let cached = loadCachedVersions();
+  if (!Array.isArray(cached) || cached.length === 0) {
+    const r = await downloadToCache(VERSIONS_LIST_URL);
+    if (r.ok) cached = loadCachedVersions();
+  }
+  if (!Array.isArray(cached) || cached.length === 0) {
+    throw new CommandDataNotCachedError('[check] no version list cached — run node dpkit.mjs --versions online once to download it.');
+  }
+  const have = cachedCommandVersions();
+  const entries = cached as Array<{ id?: string; type?: string; data_pack_version?: number }>;
+  const uncached = entries.filter(v => v.id && !have.has(v.id));
+  out(`uncached versions (${uncached.length} of ${entries.length} total — command data not downloaded):`);
+  for (const v of uncached.slice(0, 100)) out(`  ${String(v.id).padEnd(20)} ${String(v.type ?? '').padEnd(8)} dpv ${String(v.data_pack_version ?? '').padEnd(4)} —`);
+  if (uncached.length > 100) out(`  …(${uncached.length} total uncached, showing the first 100)`);
+  out(`\n  tip: pre-download a set once: node dpkit.mjs --cache-versions=1.19,1.20.4`);
+}
+
+/** --cache-versions=a,b,…: batch pre-download of per-version commands + registries. */
+async function runCacheVersions(): Promise<void> {
+  const list = CACHE_VERSIONS.split(',').map(s => s.trim()).filter(Boolean);
+  if (!list.length) {
+    throw new api.DpkitError('[check] --cache-versions needs a comma-separated version list, e.g. --cache-versions=1.19.4,1.20.4', api.EXIT_USAGE);
+  }
+  let ok = 0, failed = 0;
+  for (const v of list) {
+    try {
+      const concrete = await ensureVersionData(v, ['commands', 'registries']);
+      out(`✓ ${concrete}  (commands + registries cached)`);
+      ok++;
+    } catch (err) {
+      if (err instanceof CommandDataNotCachedError) {
+        console.error(`✗ ${v}: ${err.message}`);
+        failed++;
+      } else throw err;
+    }
+  }
+  out(`[check] cached ${ok} version(s), ${failed} failed.`);
+  process.exitCode = failed ? 1 : 0;
 }
 
 /** Engine freshness check: compares the vendored Spyglass build record with GitHub main. */

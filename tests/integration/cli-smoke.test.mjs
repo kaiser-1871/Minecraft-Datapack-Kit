@@ -102,6 +102,21 @@ test('--syntax with a never-cached version fails cleanly (no stack trace)', () =
   assert.doesNotMatch(r.stderr, /internal failure|at file:/);
 });
 
+test('--cache-versions with a bogus version fails cleanly (exit 1)', () => {
+  const { env } = freshHome();
+  const r = runCli(['--cache-versions=9.99'], { env });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /No command data cached for version 9\.99/);
+  assert.doesNotMatch(r.stderr, /internal failure|at file:/);
+});
+
+test('--versions --uncached lists versions without command data', () => {
+  const { env } = freshHome();
+  const r = runCli(['--versions', '--uncached'], { env });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /uncached versions/);
+});
+
 test('--registry=mob_effect exits 0 with values', () => {
   const { env } = freshHome();
   const r = runCli(['--registry=mob_effect'], { env });

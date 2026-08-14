@@ -34,6 +34,9 @@ First public release.
 - Build pipeline: `npm run build` = `tsc --emitDeclarationOnly` + `node scripts/build-bundle.mjs`.
 - **`dpkit-mcp` bin**: the npm package ships a second binary for the MCP server (`npx dpkit-mcp`);
   README restructured around the tool's real scope (CI gate / deeper checks / AI ground truth).
+- **On-demand version data**: `--syntax`/`--registry`/`--dump` (CLI and MCP) now download the
+  version's data themselves when it isn't cached, so one command just works (offline still fails
+  cleanly); `--cache-versions=a,b,…` pre-warms a set; `--versions --uncached` lists what's missing.
 
 ### Known issues
 

@@ -19,19 +19,37 @@ export function cacheIndexPath(): string {
   return join(cacheDir(), 'http', 'index.json');
 }
 
-/** index.json mtime in ms (0 when absent). Used to key memos so a cache refresh invalidates them. */
+/** dpkit's own sidecar index. The engine rewrites index.json from its own in-memory state and
+ * would drop entries dpkit downloaded on demand — so dpkit writes its additions here and the
+ * reader merges both. The engine never touches this file. */
+export function cacheIndexSidecarPath(): string {
+  return join(cacheDir(), 'http', 'index.dpkit.json');
+}
+
+/** max(index.json, index.dpkit.json) mtime in ms (0 when absent). Used to key memos so a cache
+ * refresh or an on-demand download invalidates them. */
 export function cacheIndexMtime(): number {
-  try { return statSync(cacheIndexPath()).mtimeMs; } catch { return 0; }
+  try { return Math.max(statSync(cacheIndexPath()).mtimeMs, statSync(cacheIndexSidecarPath()).mtimeMs); } catch { return 0; }
 }
 
 let indexMemo: { mtime: number; index: unknown } | null = null;
 
-/** The parsed http/index.json (memoized by mtime), or null when unreadable. */
+/** The parsed http/index.json merged with dpkit's sidecar (memoized by mtime), or null when
+ * unreadable. Sidecar entries win — they are dpkit's own on-demand downloads, which the engine
+ * may have dropped from its index.json in the meantime. */
 export function readCacheIndex(): unknown {
   const mtime = cacheIndexMtime();
   if (indexMemo?.mtime === mtime) return indexMemo.index;
-  let index: unknown = null;
+  let index: { index?: Record<string, Record<string, unknown>> } | null = null;
   try { index = JSON.parse(readFileSync(cacheIndexPath(), 'utf8')); } catch { /* unreadable */ }
+  try {
+    const sidecar = JSON.parse(readFileSync(cacheIndexSidecarPath(), 'utf8')) as { index?: Record<string, Record<string, unknown>> };
+    if (sidecar?.index) {
+      index ??= { index: {} };
+      index.index ??= {};
+      for (const [url, entry] of Object.entries(sidecar.index)) index.index[url] = entry;
+    }
+  } catch { /* no sidecar yet */ }
   indexMemo = { mtime, index };
   return index;
 }

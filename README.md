@@ -77,6 +77,8 @@ node dpkit.mjs --watch                           # re-check on file changes (poo
 node dpkit.mjs --config=my.json                  # specify a config file
 node dpkit.mjs --baseline=my-baseline.json       # specify the --delta baseline file
 node dpkit.mjs --versions                        # list available game versions + whether a newer one exists
+node dpkit.mjs --versions --uncached              # list versions whose command data isn't cached yet
+node dpkit.mjs --cache-versions=1.19.4,1.20.4      # pre-download per-version data (batch warm-up)
 node dpkit.mjs --check-updates                   # is the vendored Spyglass engine up to date with GitHub main?
 node dpkit.mjs --help                            # all options
 ```
@@ -213,8 +215,9 @@ node dpkit.mjs --dump-all                        # generate the full reference c
 node dpkit.mjs --dump=ref.md --version=1.21.4    # generate the reference for another version
 ```
 
-- `--syntax`/`--registry`/`--dump` are pure offline cache reads (no engine, no datapack);
-  `--version=` can point at any cached version.
+- `--syntax`/`--registry`/`--dump` read the local cache (no engine, no datapack); when the
+  version's data isn't cached yet they download it on demand (offline: a clean one-line error).
+  `--cache-versions=1.19.4,1.20.4` pre-warms a set.
 - `--complete` starts the engine and parses the specified file (`data/`-relative path + line:col)
   to return the valid values at that position; `--complete-inline="<text>"` completes the end of a
   raw command string (still needs a datapack for project context — `--datapack=` or config).

@@ -480,7 +480,12 @@ function assembleReport(
       // No diagnostics at all: either the server threw (logged) or it silently blocked.
       internalErr++; issueFiles++;
       if (failedRels.has(rel)) {
-        lines.push(`\n== ${rel} ==  ⚠ server threw during check — no diagnostics (see server log)`);
+        const concrete = !['auto', 'latest release', 'latest snapshot'].includes(versionLabel);
+        const dataCached = concrete && cachedCommandVersions().has(versionLabel);
+        const why = dataCached ? 'see server log'
+          : concrete ? `command data for ${versionLabel} is not cached locally — the upstream fetch failed or was never downloaded`
+          : 'see server log';
+        lines.push(`\n== ${rel} ==  ⚠ server threw during check — no diagnostics (${why})`);
       } else {
         lines.push(`\n== ${rel} ==  ⚠ no diagnostics received — check blocked or server error`);
       }

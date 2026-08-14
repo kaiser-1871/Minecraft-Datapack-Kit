@@ -36,10 +36,15 @@ export function resolveConcreteVersion(version: string): string {
     const pick = entries.find(v => v.type === want) ?? entries[0];
     if (pick?.id) return pick.id;
   }
-  throw new Error(
+  throw new CommandDataNotCachedError(
     `[dpkit] version '${version}' needs a concrete version, but no version data is cached locally. Run node dpkit.mjs online once to download it, or pin --version=<concrete-version>.`,
   );
 }
+
+/** Thrown when the requested version's command data isn't in the local cache — an expected,
+ * recoverable state (first use of a version), not an internal failure. CLI/MCP surface the
+ * message cleanly instead of dumping a stack trace. */
+export class CommandDataNotCachedError extends Error {}
 
 /** Set of version ids whose command data is already cached locally. */
 export function cachedCommandVersions(): Set<string> {
@@ -68,7 +73,7 @@ export function loadCommandTree(version: string = DEFAULT_VERSION): CommandNode 
   const url = `https://api.spyglassmc.com/mcje/versions/${concrete}/commands`;
   const obj = readCachedObject(url);
   if (obj == null) {
-    throw new Error(`No command data cached for version ${concrete} (${url}). Run node dpkit.mjs --version=${concrete} once to download it.`);
+    throw new CommandDataNotCachedError(`No command data cached for version ${concrete} (${url}). Run node dpkit.mjs --version=${concrete} once to download it.`);
   }
   const tree = obj as CommandNode;
   treeMemo = { key, tree };

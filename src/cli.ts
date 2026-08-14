@@ -14,7 +14,7 @@ import { detectDefaultDatapack } from './datapack-discovery.js';
 import { DEFAULT_VERSION, loadConfig } from './config.js';
 import type { DpkitConfig } from './config.js';
 import { BUILTIN_IGNORE_DESC } from './ignore.js';
-import { loadCachedVersions } from './syntax.js';
+import { cachedCommandVersions, CommandDataNotCachedError, loadCachedVersions } from './syntax.js';
 import * as api from './api.js';
 
 // ---- parse CLI args (util.parseArgs: --name=value or --name value, --no-*, repeatable --ignore) ----
@@ -272,6 +272,7 @@ export async function main(): Promise<void> {
 
 // ---------- offline syntax / dump / versions (no server, no datapack needed) ----------
 async function runOffline(): Promise<void> {
+  try {
   if (SYNTAX_GIVEN && !SYNTAX.trim()) throw new api.DpkitError('[check] --syntax needs a command path, e.g. --syntax="execute on"', api.EXIT_USAGE);
   if (DUMP_GIVEN && !DUMP) throw new api.DpkitError('[check] --dump needs an output file path, e.g. --dump=ref.md', api.EXIT_USAGE);
   if (SYNTAX_GIVEN && (DUMP_GIVEN || DUMP_ALL)) throw new api.DpkitError('[check] --syntax and --dump/--dump-all are mutually exclusive; use them separately', api.EXIT_USAGE);
@@ -324,6 +325,16 @@ async function runOffline(): Promise<void> {
     out(result.lines.join('\n'));
   }
   if (!result.found) process.exitCode = 1;
+  } catch (err) {
+    // Expected state (version's data not downloaded yet), not a crash: surface the helpful
+    // message without a stack trace, matching --registry's "not cached yet" handling.
+    if (err instanceof CommandDataNotCachedError) {
+      console.error(err.message);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
 }
 
 async function printVersions(): Promise<void> {
@@ -416,7 +427,13 @@ async function runCheck(): Promise<void> {
     renderText(result);
   }
   const failed = report.summary.errors > 0 || report.summary.internalFailures > 0 || (STRICT && report.summary.warnings > 0);
-  process.exitCode = failed ? 1 : 0;
+  // A green report for a version whose command data never made it into the cache is
+  // untrustworthy — the engine can parse nothing and stay silently "clean". Fail loudly.
+  const dataCached = !report.resolvedVersion || cachedCommandVersions().has(report.resolvedVersion);
+  process.exitCode = failed ? 1 : (dataCached ? 0 : 2);
+  if (!dataCached && JSON_OUT) {
+    console.error(`⚠ [check] command data for ${report.resolvedVersion} is not cached locally — this check may be incomplete (the engine could not fetch it). Run node dpkit.mjs --version=${report.resolvedVersion} online once to download it, then re-check.`);
+  }
 }
 
 /** Watch mode: re-check on file changes. Uses a pooled engine so re-checks are fast; plain
@@ -588,6 +605,10 @@ function renderText(result: api.CheckResult): void {
   const uncheckedTotal = cov.macroUnchecked + cov.nbtUnchecked;
   if (uncheckedTotal > 0) {
     console.log(`  ⚠ coverage gap: ${uncheckedTotal} position(s) not validated (macro ${cov.macroUnchecked} · entity-NBT ${cov.nbtUnchecked}) — “0 warnings” does not mean every position was checked`);
+  }
+  if (report.resolvedVersion && !cachedCommandVersions().has(report.resolvedVersion)) {
+    console.log(`\n⚠ command data for ${report.resolvedVersion} is not cached locally — the check above may be incomplete (the engine could not fetch it).`);
+    console.log(`  download: node dpkit.mjs --version=${report.resolvedVersion}   (needs network; then re-check)`);
   }
   if (lines.length) console.log(lines.join('\n'));
   if (agg.length) {

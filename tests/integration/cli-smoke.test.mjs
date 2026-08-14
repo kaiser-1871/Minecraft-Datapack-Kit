@@ -94,6 +94,14 @@ test('--registry=<unknown> still exits 1', () => {
   assert.match(r.stdout, /not in version/);
 });
 
+test('--syntax with a never-cached version fails cleanly (no stack trace)', () => {
+  const { env } = freshHome();
+  const r = runCli(['--syntax=execute', '--version=9.99'], { env });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /No command data cached for version 9\.99/);
+  assert.doesNotMatch(r.stderr, /internal failure|at file:/);
+});
+
 test('--registry=mob_effect exits 0 with values', () => {
   const { env } = freshHome();
   const r = runCli(['--registry=mob_effect'], { env });

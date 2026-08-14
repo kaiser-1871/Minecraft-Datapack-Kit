@@ -1,0 +1,330 @@
+import decompress from 'decompress';
+import { Buffer } from 'node:buffer';
+import cp from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import fsp from 'node:fs/promises';
+import process from 'node:process';
+import stream from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import url from 'node:url';
+import { promisify } from 'node:util';
+import { Dev, isObject } from '../../index.js';
+import { Logger } from '../Logger.js';
+export function getNodeJsExternals({ cacheRoot, logger = Logger.create(), nodeFsp = fsp } = {}) {
+    return Object.freeze({
+        archive: {
+            decompressBall(buffer, options) {
+                if (!(buffer instanceof Buffer)) {
+                    buffer = Buffer.from(buffer);
+                }
+                return decompress(buffer, { strip: options?.stripLevel });
+            },
+        },
+        error: {
+            createKind(kind, message) {
+                const error = new Error(message);
+                error.code = kind;
+                return error;
+            },
+            isKind(e, kind) {
+                return e instanceof Error && e.code === kind;
+            },
+        },
+        fs: {
+            chmod(location, mode) {
+                return nodeFsp.chmod(toFsPathLike(location), mode);
+            },
+            async mkdir(location, options) {
+                return void (await nodeFsp.mkdir(toFsPathLike(location), options));
+            },
+            readdir(location) {
+                return nodeFsp.readdir(toFsPathLike(location), {
+                    encoding: 'utf-8',
+                    withFileTypes: true,
+                });
+            },
+            readFile(location) {
+                return nodeFsp.readFile(toFsPathLike(location));
+            },
+            rm(location, options) {
+                return nodeFsp.rm(toFsPathLike(location), options);
+            },
+            async showFile(location) {
+                const execFile = promisify(cp.execFile);
+                let command;
+                switch (process.platform) {
+                    case 'darwin':
+                        command = 'open';
+                        break;
+                    case 'win32':
+                        command = 'explorer';
+                        break;
+                    default:
+                        command = 'xdg-open';
+                        break;
+                }
+                return void (await execFile(command, [toPath(location)]));
+            },
+            stat(location) {
+                return nodeFsp.stat(toFsPathLike(location));
+            },
+            unlink(location) {
+                return nodeFsp.unlink(toFsPathLike(location));
+            },
+            writeFile(location, data, options) {
+                return nodeFsp.writeFile(toFsPathLike(location), data, options);
+            },
+        },
+        web: {
+            getCache: async () => {
+                return new HttpCache(cacheRoot, logger, nodeFsp);
+            },
+        },
+    });
+}
+export const NodeJsExternals = getNodeJsExternals();
+/**
+ * @returns A {@link fs.PathLike}.
+ */
+function toFsPathLike(path) {
+    if (typeof path === 'string' && path.startsWith('file:')) {
+        return new url.URL(path);
+    }
+    return path;
+}
+function toPath(path) {
+    if (typeof path === 'string' && !path.startsWith('file:')) {
+        return path;
+    }
+    return uriToPath(path);
+}
+const uriToPath = (uri) => url.fileURLToPath(uri);
+var CacheIndex;
+(function (CacheIndex) {
+    function assert(val) {
+        if (!isObject(val)) {
+            throw new Error('Expected an object');
+        }
+        if (!('index' in val && isObject(val.index))) {
+            throw new Error("Expected 'index' to exist as an object");
+        }
+        if (!(Object.values(val.index).every((i) => isObject(i)
+            && Object.values(i).every((v) => isObject(v)
+                && 'status' in v && typeof v.status === 'number'
+                && 'statusText' in v && typeof v.statusText === 'string'
+                && 'headers' in v && isObject(v.headers)
+                && Object.values(v.headers).every((s) => typeof s === 'string')
+                && 'sha1' in v && typeof v.sha1 === 'string' && /^[0-9a-f]{40}$/.test(v.sha1)
+                && 'cacheTime' in v && typeof v.cacheTime === 'number')))) {
+            throw new Error('Malformed index structure');
+        }
+    }
+    CacheIndex.assert = assert;
+})(CacheIndex || (CacheIndex = {}));
+/**
+ * A non-spec-compliant, non-complete implementation of the Cache Web API for use in Spyglass.
+ * This class stores the cached response on the file system under the cache root.
+ */
+class HttpCache {
+    #cacheRoot;
+    #httpRoot;
+    #indexUri;
+    #objectsRoot;
+    #tempRoot;
+    #logger;
+    #fsp;
+    #index;
+    #loadIndexPromise;
+    constructor(cacheRoot, logger, nodeFsp) {
+        if (cacheRoot) {
+            this.#cacheRoot = cacheRoot;
+            this.#httpRoot = `${this.#cacheRoot}http/`;
+            this.#indexUri = `${this.#httpRoot}index.json`;
+            this.#objectsRoot = `${this.#httpRoot}objects/`;
+            this.#tempRoot = `${this.#httpRoot}temp/`;
+        }
+        this.#logger = logger;
+        this.#fsp = nodeFsp;
+    }
+    async match(request, _options) {
+        if (!(this.#indexUri && this.#objectsRoot && this.#tempRoot)) {
+            return undefined;
+        }
+        const index = await this.#loadIndex(this.#indexUri);
+        const requestUri = request instanceof Request ? request.url : request.toString();
+        const requestRange = request instanceof Request ? request.headers.get('range') : undefined;
+        const indexEntry = index.index[requestUri]?.[requestRange ?? ''];
+        if (!indexEntry) {
+            return undefined;
+        }
+        try {
+            const objectFileHandle = await this.#fsp.open(this.#getObjectUri(this.#objectsRoot, indexEntry.sha1));
+            const bodyStream = objectFileHandle.createReadStream({ autoClose: true });
+            return new Response(stream.Readable.toWeb(bodyStream), {
+                headers: indexEntry.headers,
+                status: indexEntry.status,
+                statusText: indexEntry.statusText,
+            });
+        }
+        catch (e) {
+            if (e?.code === 'ENOENT') {
+                this.#logger.warn(`Object file for ${JSON.stringify(indexEntry)} does not exist`, e);
+                delete index.index[requestUri]?.[requestRange ?? ''];
+                if (Object.values(index.index[requestUri]).length === 0) {
+                    delete index.index[requestUri];
+                }
+                await this.#saveIndex(this.#indexUri, this.#tempRoot);
+                return undefined;
+            }
+            throw e;
+        }
+    }
+    async put(request, response) {
+        if (!(this.#tempRoot && this.#objectsRoot && this.#indexUri && response.body)) {
+            return;
+        }
+        const etag = response.headers.get('etag');
+        const lastModified = response.headers.get('last-modified');
+        if (!(etag || lastModified)) {
+            return;
+        }
+        const requestUri = request instanceof Request ? request.url : request.toString();
+        const requestRange = request instanceof Request ? request.headers.get('range') : undefined;
+        // Save response body in a temp file and computes its SHA-1 digest
+        const { bodySha1, bodyTempUri } = await this.#saveResponseBody(response.body, this.#tempRoot);
+        // Update the index
+        const index = await this.#loadIndex(this.#indexUri);
+        index.index[requestUri] ??= {};
+        const previousEntry = index.index[requestUri][requestRange ?? ''];
+        index.index[requestUri][requestRange ?? ''] = {
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers),
+            sha1: bodySha1,
+            cacheTime: Date.now(),
+        };
+        await this.#saveIndex(this.#indexUri, this.#tempRoot);
+        if (previousEntry) {
+            await this.#cleanUpDanglingObject(this.#objectsRoot, index, previousEntry.sha1);
+        }
+        // Rename the temp body file to its final location in the content-addressable object store
+        // match() would gracefully handle missing object if this step fails for any reason
+        const objectUri = this.#getObjectUri(this.#objectsRoot, bodySha1);
+        await this.#fsp.mkdir(new URL('.', objectUri), { recursive: true, mode: 0o755 });
+        await this.#fsp.rename(bodyTempUri, objectUri);
+    }
+    async #saveResponseBody(body, tempRoot) {
+        const bodyStream = stream.Readable.fromWeb(body);
+        const bodyHash = createHash('sha1');
+        // Tee the body stream to both a temporary file write stream and the SHA-1 hash stream
+        const tempUri = new URL(`body.${randomUUID()}.tmp`, tempRoot);
+        await this.#fsp.mkdir(new URL(tempRoot), { recursive: true, mode: 0o755 });
+        const tempHandle = await this.#fsp.open(tempUri, 'w', 0o644);
+        const writeStream = tempHandle.createWriteStream({ autoClose: true });
+        bodyStream.pipe(bodyHash);
+        await pipeline(bodyStream, writeStream);
+        const bodySha1 = bodyHash.digest('hex');
+        return { bodySha1, bodyTempUri: tempUri };
+    }
+    async #loadIndex(indexUri) {
+        await (this.#loadIndexPromise ??= (async () => {
+            try {
+                const parsedIndex = JSON.parse(await this.#fsp.readFile(new URL(indexUri), 'utf8'));
+                CacheIndex.assert(parsedIndex);
+                this.#index = parsedIndex;
+            }
+            catch (e) {
+                if (e.code === 'ENOENT') {
+                    // Triger legacy cache clean up if no index file for the new cache scheme exists.
+                    this.#logger.info('[HttpCache] No cache index found; cleaning up legacy cache files');
+                    await this.#cleanUpLegacyCache();
+                }
+                else {
+                    this.#logger.warn('[HttpCache] Corrupted cache index', e);
+                }
+                this.#index = { index: {} };
+            }
+        })());
+        return this.#index;
+    }
+    async #saveIndex(indexUri, tempRoot) {
+        try {
+            Dev.assertDefined(this.#index);
+            const tempUri = new URL(`index.${randomUUID()}.tmp`, tempRoot);
+            await this.#fsp.mkdir(new URL(tempRoot), { recursive: true, mode: 0o755 });
+            await this.#fsp.writeFile(tempUri, `${JSON.stringify(this.#index)}\n`, {
+                mode: 0o644,
+            });
+            await this.#fsp.rename(tempUri, new URL(indexUri));
+        }
+        catch (e) {
+            this.#logger.warn('[HttpCache] Failed saving index', e);
+        }
+    }
+    /**
+     * Remove cache files used by older versions of Spyglass.
+     * - until v2026.5.8+8c7f6e, `${cacheRoot}downloader/`
+     * - until v2026.5.16+9c4fa2, `${cacheRoot}http/${base64UrlEncoded}.${'bin' | 'etag'}`
+     */
+    async #cleanUpLegacyCache() {
+        if (!this.#httpRoot) {
+            return;
+        }
+        try {
+            await this.#fsp.rm(new URL('downloader/', this.#cacheRoot), { recursive: true });
+        }
+        catch (e) {
+            if (e.code !== 'ENOENT') {
+                this.#logger.warn('[HttpCache] Failed cleaning up downloader/ dir', e);
+            }
+        }
+        try {
+            const httpDir = await this.#fsp.opendir(new URL(this.#httpRoot));
+            for await (const entry of httpDir) {
+                if (entry.isFile() && (entry.name.endsWith('.bin') || entry.name.endsWith('.etag'))) {
+                    await this.#fsp.rm(new URL(entry.name, this.#httpRoot));
+                }
+            }
+        }
+        catch (e) {
+            if (e.code !== 'ENOENT') {
+                this.#logger.warn('[HttpCache] Failed cleaning up legacy cache files', e);
+            }
+        }
+    }
+    async #cleanUpDanglingObject(objectsRoot, index, sha1) {
+        if (Object.values(index.index).some((i) => Object.values(i).some((v) => v.sha1 === sha1))) {
+            // The object is still referenced
+            return false;
+        }
+        try {
+            await this.#fsp.rm(this.#getObjectUri(objectsRoot, sha1));
+            return true;
+        }
+        catch (e) {
+            if (e.code !== 'ENOENT') {
+                this.#logger.warn('[HttpCache] Failed cleaning up dangling object', e);
+            }
+        }
+        return false;
+    }
+    #getObjectUri(objectsRoot, sha1) {
+        return new URL(`${sha1.slice(0, 2)}/${sha1}`, objectsRoot);
+    }
+    async add() {
+        throw new Error('Method not implemented.');
+    }
+    async addAll() {
+        throw new Error('Method not implemented.');
+    }
+    async delete() {
+        throw new Error('Method not implemented.');
+    }
+    async keys() {
+        throw new Error('Method not implemented.');
+    }
+    async matchAll() {
+        throw new Error('Method not implemented.');
+    }
+}
+//# sourceMappingURL=NodeJsExternals.js.map

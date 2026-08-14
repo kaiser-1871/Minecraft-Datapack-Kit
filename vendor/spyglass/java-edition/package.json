@@ -1,0 +1,49 @@
+{
+  "name": "@spyglassmc/java-edition",
+  "version": "0.1.0-PLACEHOLDER",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "author": "SPGoding",
+  "contributors": [
+    "Misode"
+  ],
+  "license": "MIT",
+  "directories": {
+    "test": "test/"
+  },
+  "scripts": {
+    "build": "wireit",
+    "release": "npm publish",
+    "release:dry": "npm publish --tag latest --dry-run"
+  },
+  "wireit": {
+    "build": {
+      "dependencies": [
+        "../..:build:tsc"
+      ],
+      "command": "node ./scripts/fetch_bundled_meta_resources.ts"
+    }
+  },
+  "dependencies": {
+    "@spyglassmc/core": "*",
+    "@spyglassmc/json": "*",
+    "@spyglassmc/locales": "*",
+    "@spyglassmc/mcfunction": "*",
+    "@spyglassmc/mcdoc": "*",
+    "@spyglassmc/nbt": "*",
+    "@zip.js/zip.js": "^2.8.34"
+  },
+  "devDependencies": {},
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SpyglassMC/Spyglass.git"
+  },
+  "homepage": "https://spyglassmc.com",
+  "bugs": {
+    "url": "https://github.com/SpyglassMC/Spyglass/issues"
+  }
+}

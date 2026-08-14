@@ -8,24 +8,47 @@
   "bin": {
     "dpkit": "dpkit.mjs"
   },
+  "files": [
+    "dist",
+    "dpkit.mjs",
+    "vendor",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "build:watch": "tsc --watch",
-    "test": "npm run build && node --test \"tests/**/*.test.mjs\"",
+    "test": "npm run build && node --test \"tests/**/*.test.mjs\" && node tests/mcp-smoke.mjs",
+    "test:all": "npm test && npm run parity",
     "mcp": "node dist/mcp.js",
-    "parity": "node tests/parity.mjs"
+    "bench": "node tests/bench.mjs",
+    "vendor": "node scripts/vendor-spyglass.mjs",
+    "parity": "node tests/parity.mjs",
+    "prepublishOnly": "npm run build"
   },
-  "keywords": [],
+  "keywords": [
+    "minecraft",
+    "datapack",
+    "spyglass",
+    "mcdoc",
+    "lsp",
+    "mcp",
+    "linter"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@spyglassmc/core": "^0.4.53",
-    "@spyglassmc/java-edition": "^0.3.66",
-    "@spyglassmc/language-server": "^0.4.66",
-    "@spyglassmc/locales": "^0.3.27",
-    "@spyglassmc/mcdoc": "^0.3.57",
+    "@spyglassmc/core": "file:vendor/spyglass/core",
+    "@spyglassmc/java-edition": "file:vendor/spyglass/java-edition",
+    "@spyglassmc/json": "file:vendor/spyglass/json",
+    "@spyglassmc/language-server": "file:vendor/spyglass/language-server",
+    "@spyglassmc/locales": "file:vendor/spyglass/locales",
+    "@spyglassmc/mcdoc": "file:vendor/spyglass/mcdoc",
+    "@spyglassmc/mcfunction": "file:vendor/spyglass/mcfunction",
+    "@spyglassmc/nbt": "file:vendor/spyglass/nbt",
     "env-paths": "^2.2.1",
+    "vscode-languageserver-textdocument": "^1.0.12",
     "zod": "^4.4.3"
   },
   "devDependencies": {

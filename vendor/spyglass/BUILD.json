@@ -1,0 +1,21 @@
+{
+  "builtAt": "2026-08-14T12:38:05.998Z",
+  "source": "D:\\Spyglass-main",
+  "sourceMatchesMainHead": false,
+  "spyglassMainAtVendor": {
+    "sha": "7a8d035b8247fd3539c5e9a81ba4c9552a873c34",
+    "date": "2026-08-12T04:38:32Z",
+    "message": "♻️ Replace acmesh/nginx with Caddy (#2071)"
+  },
+  "buildTool": "tsgo 7.0.0-dev.20260511.1 (npx tsgo -b packages)",
+  "packages": [
+    "core",
+    "java-edition",
+    "json",
+    "locales",
+    "mcdoc",
+    "mcfunction",
+    "nbt",
+    "language-server"
+  ]
+}

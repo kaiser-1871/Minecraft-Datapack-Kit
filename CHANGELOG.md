@@ -32,6 +32,8 @@ First public release.
 - The three mcfunction-line gotchas, the `$` macro-line registry validation, and the
   entity-NBT schema validation ship as described in the README.
 - Build pipeline: `npm run build` = `tsc --emitDeclarationOnly` + `node scripts/build-bundle.mjs`.
+- **`dpkit-mcp` bin**: the npm package ships a second binary for the MCP server (`npx dpkit-mcp`);
+  README restructured around the tool's real scope (CI gate / deeper checks / AI ground truth).
 
 ### Known issues
 

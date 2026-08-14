@@ -1,16 +1,18 @@
 {
   "name": "dpkit",
   "version": "1.0.0",
-  "description": "Datapack Kit — check a datapack with the Spyglass/DHP engine and teach its exact per-version command syntax.",
+  "description": "Check any datapack anywhere (CLI / CI / AI) with the Spyglass/DHP engine — plus per-version command syntax for humans and AI agents.",
   "type": "module",
   "main": "dist/api.js",
   "types": "dist/api.d.ts",
   "bin": {
-    "dpkit": "dpkit.mjs"
+    "dpkit": "dpkit.mjs",
+    "dpkit-mcp": "dpkit-mcp.mjs"
   },
   "files": [
     "dist",
     "dpkit.mjs",
+    "dpkit-mcp.mjs",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",

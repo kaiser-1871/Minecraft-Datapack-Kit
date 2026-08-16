@@ -14,9 +14,10 @@ test('--json report shape is stable (top-level keys and field types)', async () 
 
   // top-level keys (rename/remove/add a field → this breaks)
   assert.deepEqual(Object.keys(report).sort(), [
-    'byMessage', 'coverage', 'datapack', 'engine', 'files', 'gotchas', 'ignored',
-    'issues', 'log', 'resolvedSymbols', 'resolvedVersion', 'schemaVersion', 'scopeHints',
-    'summary', 'version', 'versionInfo',
+    'byMessage', 'can_give_suggestions', 'coverage', 'datapack', 'engine', 'files', 'gotchas',
+    'ignored', 'issues', 'log', 'registry_coverage', 'resolvedSymbols', 'resolvedVersion',
+    'schemaVersion', 'scopeHints', 'summary', 'unchecked_registry_ids', 'version',
+    'versionInfo', 'version_profile',
   ].sort());
 
   // schema version gate

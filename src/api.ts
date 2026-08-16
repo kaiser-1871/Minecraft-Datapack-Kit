@@ -1,6 +1,7 @@
 // api.ts — the typed public API for dpkit. Both the CLI and the MCP server call these
 // functions; nothing here talks to the terminal or a process — that's the caller's job.
-import { closeSync, existsSync, openSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BASELINE_FILE } from './paths.js';
 import { DEFAULT_VERSION } from './config.js';
@@ -15,6 +16,8 @@ import { loadRegistries, normalizeRegistryName, registryIndex } from './registry
 import { loadVanillaTags } from './vanilla-tags.js';
 import { buildDeclaredRegistryIds, scanMacroRegistry } from './macrocheck.js';
 import type { MacroIssue, MacroStats, MacroUncheckedPosition } from './macrocheck.js';
+import { expandMacroText, resolveFunctionPath } from './macro-expand.js';
+import { runRules } from './rules.js';
 import { loadEntitySchemas, scanEntityNbt } from './entity-nbt.js';
 import type { NbtIssue, NbtScanStats, NbtUncheckedPosition } from './entity-nbt.js';
 import type { CommandTree } from './syntax.js';
@@ -27,11 +30,12 @@ import { prepareAuxPacks, resolveAuxSymbol, scanPackSymbols, splitPathList } fro
 import type { AuxPack, ResolvedAuxSymbol } from './symbol-providers.js';
 import { planConcreteVersion, planVersionCheck } from './cache-policy.js';
 import type { CacheMissPolicy, VersionPlan } from './cache-policy.js';
+import { versionCapability } from './version-profile.js';
 import { createInProcEngine, createInProcEnginePool } from './engine/inproc.js';
 import { loadCommandTree, loadCachedVersions, cachedCommandVersions, renderPath, renderAll, resolveConcreteVersion } from './syntax.js';
 import { initPlugins, runAfterCheck, runBeforeCheck } from './plugins.js';
 import type { DpkitPlugin, PluginContext } from './plugins.js';
-import type { BaselineEntry, CheckLog, CompletionItemDTO, GameLogReport, GotchaIssue, RawDiagnostic, ReportIssue, SyntaxResult } from './types.js';
+import type { BaselineEntry, CheckLog, CompletionItemDTO, GameLogReport, GotchaIssue, RawDiagnostic, ReportIssue, RuleReport, SyntaxResult } from './types.js';
 import type { CheckEngine, EngineCheckResult, EngineSnapshot } from './engine/types.js';
 
 export type { CheckEngine } from './engine/types.js';
@@ -90,6 +94,14 @@ export interface CheckOptions {
   falsePositives?: boolean | string[];
   /** Plugins to run around the check (see src/plugins.ts). */
   plugins?: DpkitPlugin[];
+  /** Project-rule lint selectors: comma-separated rule names; empty/undefined = all rules off. */
+  rules?: string[];
+  /** Enable suggestion output (only emitted when confidence >= 0.9). */
+  suggestions?: boolean;
+  /** Automatically write the report file after a check (default true in CLI; API default false). */
+  writeReport?: boolean;
+  /** Report file path for writeReport (default dpkit_pvp_report.json). */
+  reportFile?: string;
   onLog?: (msg: string) => void;
 }
 
@@ -137,7 +149,26 @@ export interface CheckReport {
   /** Target vs actual check version + cache source (see --cache-miss). */
   versionInfo: VersionCheckInfo;
   files: { checked: number; clean: number };
-  summary: { errors: number; warnings: number; ignored: number; internalFailures: number; gotchas: number; symbolsResolved: number; scopeHints: number; knownFalsePositives: number };
+  summary: { errors: number; warnings: number; ignored: number; internalFailures: number; gotchas: number; symbolsResolved: number; scopeHints: number; knownFalsePositives: number; rule_alerts?: number };
+  /** Version data completeness for the effective version: 'full' | 'partial' | 'none' | 'ambiguous'. */
+  version_profile?: 'full' | 'partial' | 'none' | 'ambiguous';
+  /** Fraction [0,1] of known registry entries covered by the cached registry data (null when none). */
+  registry_coverage?: number | null;
+  /** Registry IDs that could not be checked because the version data is incomplete. */
+  unchecked_registry_ids?: string[];
+  /** False when suggestions must be hidden (version data incomplete / ambiguous). */
+  can_give_suggestions?: boolean;
+  /** Project-rule lint section (only present when --rules/API rules enabled). */
+  rules?: RuleReport;
+  /** ISO timestamp of report generation (report-file mode). */
+  generated_at?: string;
+  /** Diff vs the previous report file (null when no previous report existed). */
+  diff_from_last?: {
+    files_added: number;
+    files_removed: number;
+    new_errors: number;
+    fixed_errors: number;
+  } | null;
   issues: ReportIssue[];
   ignored: ReportIssue[];
   gotchas: { file: string; items: GotchaIssue[] }[];
@@ -200,6 +231,60 @@ export interface CheckResult {
   agg: [string, number][];
   ignoredAgg: [string, number][];
   newBaseline: { datapack: string; version: string; files: Record<string, BaselineEntry> };
+}
+
+/** One diagnostic in the enhanced, evidence-carrying shape used by check_command/check_macro/rules. */
+export interface EnhancedDiagnostic {
+  file: string;
+  line: number;
+  column: number;
+  severity: 'error' | 'warning' | 'info';
+  code: string;
+  message: string;
+  evidence: string[];
+  confidence: number;
+  suggestion: string | null;
+  suggestion_confidence: number | null;
+}
+
+/** Result of checking one complete command. */
+export interface CommandCheckResult {
+  command: string;
+  valid: boolean;
+  verification: 'full' | 'partial' | 'none';
+  errors: EnhancedDiagnostic[];
+  warnings: EnhancedDiagnostic[];
+  suggestions: EnhancedDiagnostic[];
+  version: string;
+  version_profile: 'full' | 'partial' | 'none' | 'ambiguous';
+  can_give_suggestions: boolean;
+}
+
+/** One expanded/checked macro line. */
+export interface MacroLineCheck {
+  line: number;
+  original: string;
+  expanded: string | null;
+  checked: boolean;
+  unverified_reason?: string;
+  result?: CommandCheckResult;
+}
+
+/** Result of checking a macro function with optional args. */
+export interface MacroCheckResult {
+  macro: string;
+  macro_fully_checked: boolean;
+  lines: MacroLineCheck[];
+  errors: EnhancedDiagnostic[];
+  warnings: EnhancedDiagnostic[];
+  suggestions: EnhancedDiagnostic[];
+}
+
+/** Result of writing a report file (including diff against the previous report). */
+export interface WriteReportResult {
+  path: string;
+  written: boolean;
+  diff_from_last: CheckReport['diff_from_last'];
 }
 
 export interface VersionListResult {
@@ -1136,6 +1221,21 @@ function assembleReport(
     message: versionPlan?.message ?? null,
   };
 
+  // Version capability matrix (conservative: incomplete data must not look authoritative).
+  let packMcmetaInfo: { minFormat: number | null; maxFormat: number | null; packFormat: number | null } | null = null;
+  try {
+    const mcmetaPath = join(workRoot ?? opts.datapack, 'pack.mcmeta');
+    if (existsSync(mcmetaPath)) {
+      const s = scanPackMcmeta(readFileSync(mcmetaPath, 'utf8'));
+      packMcmetaInfo = { minFormat: s.minFormat, maxFormat: s.maxFormat, packFormat: s.packFormat };
+    }
+  } catch { /* best-effort */ }
+  const capability = versionCapability(opts.version, packMcmetaInfo, resolvedVersion);
+
+  const ruleReport = opts.rules && opts.rules.length > 0
+    ? runRules(workRoot ?? opts.datapack, { rules: opts.rules, suggestions: opts.suggestions })
+    : null;
+
   const report: CheckReport = {
     datapack: opts.datapack,
     ...(opts.datapackSource ? { datapackSource: opts.datapackSource } : {}),
@@ -1152,7 +1252,13 @@ function assembleReport(
       symbolsResolved,
       scopeHints: scopeHintsCount,
       knownFalsePositives: knownFpCount,
+      ...(ruleReport ? { rule_alerts: ruleReport.alerts } : {}),
     },
+    version_profile: capability.profile,
+    registry_coverage: capability.registry_coverage,
+    unchecked_registry_ids: capability.unchecked_registry_ids,
+    can_give_suggestions: capability.can_give_suggestions,
+    ...(ruleReport ? { rules: ruleReport } : {}),
     issues,
     ignored: ignoredList,
     resolvedSymbols,
@@ -1199,6 +1305,175 @@ function syncPluginLines(result: CheckResult): void {
   if (missing.length) {
     result.lines.push('', '== plugin-added issues ==', ...missing);
   }
+}
+
+// ---- complete command / macro ------------------------------------------------
+
+export interface CheckCommandOptions {
+  command: string;
+  version: string;
+  /** Datapack directory used as parser context (namespace, tags, declared registries). */
+  datapack?: string;
+  /** Virtual context hints (reserved for future parser context; currently informational). */
+  context?: { selectorType?: string; namespace?: string; macroVariables?: Record<string, unknown> };
+  /** Enable suggestion output (default false; suggestions require confidence >= 0.9 and full version data). */
+  suggestions?: boolean;
+  noGotchas?: boolean;
+}
+
+function enhancedFromRaw(file: string, d: RawDiagnostic): EnhancedDiagnostic {
+  const sev = d.severity === 1 ? 'error' : d.severity === 2 ? 'warning' : 'info';
+  const confidence = d.confidence ?? (sev === 'error' ? 1 : sev === 'warning' ? 0.8 : 0.6);
+  return {
+    file,
+    line: d.range.start.line + 1,
+    column: d.range.start.character,
+    severity: sev,
+    code: d.code ?? (sev === 'error' ? 'syntax-error' : sev === 'warning' ? 'syntax-warning' : 'syntax-info'),
+    message: d.message,
+    evidence: d.evidence ?? [],
+    confidence,
+    suggestion: d.suggestion ?? null,
+    suggestion_confidence: d.suggestion_confidence ?? null,
+  };
+}
+
+export async function checkCommand(opts: CheckCommandOptions): Promise<CommandCheckResult> {
+  const command = opts.command.trim();
+  if (!command) throw new DpkitError('[check-command] command must not be empty', EXIT_USAGE);
+
+  let datapack = opts.datapack;
+  let tempRoot: string | null = null;
+  if (!datapack) {
+    const cwd = process.cwd();
+    if (existsSync(join(cwd, 'pack.mcmeta'))) {
+      datapack = cwd;
+    } else {
+      // No datapack context was provided: use a minimal ephemeral datapack so the parser has a
+      // valid project root. It is removed before returning (no result depends on it).
+      tempRoot = mkdtempSync(join(tmpdir(), 'dpkit-command-'));
+      writeFileSync(join(tempRoot, 'pack.mcmeta'), JSON.stringify({ pack: { pack_format: 94, description: 'dpkit command check' } }));
+      mkdirSync(join(tempRoot, 'data', '__dpkit__', 'function'), { recursive: true });
+      datapack = tempRoot;
+    }
+  }
+  let packMcmetaInfo: { minFormat: number | null; maxFormat: number | null; packFormat: number | null } | null = null;
+  try {
+    const mcmetaPath = join(datapack, 'pack.mcmeta');
+    if (existsSync(mcmetaPath)) {
+      const s = scanPackMcmeta(readFileSync(mcmetaPath, 'utf8'));
+      packMcmetaInfo = { minFormat: s.minFormat, maxFormat: s.maxFormat, packFormat: s.packFormat };
+    }
+  } catch { /* best-effort */ }
+
+  const engine = createInProcEngine();
+  const rel = '__dpkit__/command.mcfunction';
+  if (!engine.checkText) throw new DpkitError('[check-command] this engine does not support in-memory command checking', EXIT_USAGE);
+  let resolvedVersion: string | null = null;
+  let diagnostics: RawDiagnostic[] = [];
+  try {
+    const r = await engine.checkText({
+      datapack,
+      version: opts.version,
+      rel,
+      text: command,
+      noGotchas: opts.noGotchas,
+    });
+    resolvedVersion = r.resolvedVersion;
+    diagnostics = r.diagnostics;
+  } finally {
+    await engine.close();
+    if (tempRoot) { try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* best-effort */ } }
+  }
+
+  const capability = versionCapability(opts.version, packMcmetaInfo, resolvedVersion);
+  const verification: CommandCheckResult['verification'] =
+    capability.profile === 'full' ? 'full'
+    : capability.profile === 'partial' ? 'partial'
+    : capability.profile === 'ambiguous' ? (capability.hasCommands ? 'partial' : 'none')
+    : 'none';
+
+  const all = diagnostics.map(d => enhancedFromRaw(rel, d));
+  const errors = all.filter(d => d.severity === 'error');
+  const warnings = all.filter(d => d.severity === 'warning');
+  let suggestions = all.filter(d => d.severity === 'info' && d.suggestion);
+  if (!capability.can_give_suggestions || opts.suggestions !== true) suggestions = [];
+
+  return {
+    command,
+    valid: errors.length === 0,
+    verification,
+    errors,
+    warnings,
+    suggestions,
+    version: resolvedVersion ?? opts.version,
+    version_profile: capability.profile,
+    can_give_suggestions: capability.can_give_suggestions,
+  };
+}
+
+export interface CheckMacroOptions {
+  macro: string;
+  version: string;
+  datapack: string;
+  /** Macro variable values; omit to do syntax-only (unverified) expansion. */
+  macroArgs?: Record<string, unknown>;
+  /** Enable suggestion output (default false). */
+  suggestions?: boolean;
+}
+
+export async function checkMacro(opts: CheckMacroOptions): Promise<MacroCheckResult> {
+  const file = resolveFunctionPath(opts.datapack, opts.macro);
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    throw new DpkitError(`[macro] function file not found: ${file}`, EXIT_USAGE);
+  }
+
+  const expanded = expandMacroText(text, opts.macroArgs);
+  const lines: MacroLineCheck[] = [];
+  const errors: EnhancedDiagnostic[] = [];
+  const warnings: EnhancedDiagnostic[] = [];
+  const suggestions: EnhancedDiagnostic[] = [];
+
+  for (const ln of expanded.lines) {
+    if (!ln.checked || ln.expanded === null) {
+      lines.push({
+        line: ln.line,
+        original: ln.original,
+        expanded: null,
+        checked: false,
+        unverified_reason: ln.unverified_reason,
+      });
+      continue;
+    }
+    const result = await checkCommand({
+      command: ln.expanded,
+      version: opts.version,
+      datapack: opts.datapack,
+      suggestions: opts.suggestions,
+    });
+    lines.push({
+      line: ln.line,
+      original: ln.original,
+      expanded: ln.expanded,
+      checked: true,
+      result,
+    });
+    errors.push(...result.errors);
+    warnings.push(...result.warnings);
+    suggestions.push(...result.suggestions);
+  }
+
+  return {
+    macro: opts.macro,
+    macro_fully_checked: expanded.fullyChecked,
+    lines,
+    errors,
+    warnings,
+    suggestions,
+  };
 }
 
 // ---- complete ----------------------------------------------------------------
@@ -1398,3 +1673,7 @@ export { createLspEngine };
 export { createInProcEnginePool };
 export { checkEngineUpdates, loadEngineBuildInfo } from './update-check.js';
 export { addIssue, loadPluginModules } from './plugins.js';
+export { runRules, parseRuleList, BUILTIN_RULES } from './rules.js';
+export { writeReport, readReport, diffReports, DEFAULT_REPORT_FILE } from './report-store.js';
+export { expandMacroText, resolveFunctionPath, macroVariables } from './macro-expand.js';
+export { versionCapability, versionProfileLabel } from './version-profile.js';

@@ -64,6 +64,8 @@ export async function main(): Promise<void> {
       noMacro: z.boolean().optional().describe('Skip the $ macro-line registry-ID check.'),
       noEntityNbt: z.boolean().optional().describe('Skip the entity-NBT schema check (summon/data field names + registry IDs).'),
       noLog: z.boolean().optional().describe('Skip the game-log self-check.'),
+      rules: z.array(z.string()).optional().describe('Project-consistency rules to enable (default: none).'),
+      suggestions: z.boolean().optional().describe('Allow suggestion output (default false).'),
     },
   }, async (args) => {
     try {
@@ -78,6 +80,8 @@ export async function main(): Promise<void> {
         noMacro: args.noMacro,
         noEntityNbt: args.noEntityNbt,
         noLog: args.noLog,
+        rules: args.rules,
+        suggestions: args.suggestions,
         minecraftRoot: cfg.minecraftRoot,
       });
       const report = r.report;
@@ -98,6 +102,117 @@ export async function main(): Promise<void> {
         gotchasTotal: gotchas.total,
         gotchasTruncated: gotchas.truncated,
       }));
+    } catch (e) {
+      return errResult(e);
+    }
+  });
+
+  server.registerTool('check_command', {
+    description:
+      'Validate one complete Minecraft command string against a game version (uses the same in-process Spyglass parser as the CLI, no temp files). ' +
+      'Returns valid/verification/errors/warnings/suggestions. When the version data is incomplete, verification is partial/none and suggestions are hidden.',
+    inputSchema: {
+      command: z.string().describe('The full command to validate, e.g. "damage @s 5 battle:true_dmg".'),
+      version: z.string().optional().describe('Game version. Defaults to config / $DPKIT_VERSION.'),
+      datapack: z.string().optional().describe('Optional datapack context (namespace/tags/declared registries). Defaults to config / cwd.'),
+      suggestions: z.boolean().optional().describe('Allow suggestion output (default false).'),
+    },
+  }, async (args) => {
+    try {
+      const version = ver(args.version);
+      const r = await api.checkCommand({
+        command: args.command,
+        version,
+        datapack: (args.datapack ?? defaultDatapack(version)) || undefined,
+        suggestions: args.suggestions,
+      });
+      return jsonResult(ok(r));
+    } catch (e) {
+      return errResult(e);
+    }
+  });
+
+  server.registerTool('check_macro', {
+    description:
+      'Expand `$` macro lines in a function and validate each expanded command with the full command checker. ' +
+      'Pass macro_args to fully expand; without args, lines are marked unverified (never errors).',
+    inputSchema: {
+      macro: z.string().describe('Namespaced function id, e.g. battle:archer/pierce_summon.'),
+      version: z.string().optional().describe('Game version. Defaults to config / $DPKIT_VERSION.'),
+      datapack: z.string().optional().describe('Datapack path. Defaults to config / $DPKIT_DATAPACK / auto-detect.'),
+      macro_args: z.record(z.string(), z.unknown()).optional().describe('Macro variable values as a JSON object.'),
+      suggestions: z.boolean().optional().describe('Allow suggestion output (default false).'),
+    },
+  }, async (args) => {
+    try {
+      const version = ver(args.version);
+      const r = await api.checkMacro({
+        macro: args.macro,
+        version,
+        datapack: args.datapack ?? defaultDatapack(version),
+        macroArgs: args.macro_args,
+        suggestions: args.suggestions,
+      });
+      return jsonResult(ok(r));
+    } catch (e) {
+      return errResult(e);
+    }
+  });
+
+  server.registerTool('lint_rules', {
+    description:
+      'Run project-consistency lint rules over a datapack. Rules are off by default; pass rules= to enable, e.g. ["cleanup-id-coverage","on-eat-completeness"]. ' +
+      'Returns warnings with evidence + confidence, never unqualified suggestions.',
+    inputSchema: {
+      datapack: z.string().optional().describe('Datapack path. Defaults to config / $DPKIT_DATAPACK / auto-detect.'),
+      rules: z.array(z.string()).optional().describe('Rule names to enable. Empty = no rules.'),
+      suggestions: z.boolean().optional().describe('Allow suggestion output (default false).'),
+    },
+  }, async (args) => {
+    try {
+      const version = ver();
+      const datapack = args.datapack ?? defaultDatapack(version);
+      const r = api.runRules(datapack, { rules: args.rules ?? [], suggestions: args.suggestions });
+      const t = truncate(r.items, 200, 'narrow the datapack or rules to reduce the result set');
+      return jsonResult(ok({
+        ...r,
+        items: t.items,
+        total: t.total,
+        truncated: t.truncated,
+      }));
+    } catch (e) {
+      return errResult(e);
+    }
+  });
+
+  server.registerTool('write_report', {
+    description:
+      'Write a dpkit JSON report to disk (default dpkit_pvp_report.json). Reads the previous report and returns diff_from_last.',
+    inputSchema: {
+      report: z.unknown().describe('The CheckReport JSON object to persist.'),
+      path: z.string().optional().describe('Output path (default dpkit_pvp_report.json).'),
+    },
+  }, async (args) => {
+    try {
+      const path = args.path ?? 'dpkit_pvp_report.json';
+      const r = api.writeReport(args.report as Parameters<typeof api.writeReport>[0], path);
+      return jsonResult(ok(r));
+    } catch (e) {
+      return errResult(e);
+    }
+  });
+
+  server.registerTool('diff_reports', {
+    description:
+      'Compare two dpkit report JSON objects and return files_added/files_removed/new_errors/fixed_errors. Returns null when old is missing.',
+    inputSchema: {
+      old: z.unknown().nullable().describe('Previous report JSON (or null).'),
+      current: z.unknown().describe('Current report JSON.'),
+    },
+  }, async (args) => {
+    try {
+      const r = api.diffReports(args.old as Parameters<typeof api.diffReports>[0], args.current as Parameters<typeof api.diffReports>[1]);
+      return jsonResult(ok({ diff: r }));
     } catch (e) {
       return errResult(e);
     }

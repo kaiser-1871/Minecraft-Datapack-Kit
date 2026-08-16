@@ -159,7 +159,7 @@ test('a broken pack.mcmeta is reported and exits 1', () => {
   const pack = join(home, 'pack');
   cpSync(FIXTURE, pack, { recursive: true });
   writeFileSync(join(pack, 'pack.mcmeta'), 'not json {{');
-  const r = runCli(['--datapack=' + pack, '--version=26.2', '--no-log'], { env });
+  const r = runCli(['--datapack=' + pack, '--version=26.2', '--no-log', '--no-write-report'], { env });
   assert.equal(r.status, 1);
   assert.match(r.stdout, /pack\.mcmeta is not valid JSON/);
 });
@@ -169,7 +169,7 @@ test('a data-less datapack with valid pack.mcmeta exits 0', () => {
   const pack = join(home, 'empty-pack');
   mkdirSync(pack, { recursive: true });
   writeFileSync(join(pack, 'pack.mcmeta'), JSON.stringify({ pack: { pack_format: 107, description: 'empty' } }));
-  const r = runCli(['--datapack=' + pack, '--version=26.2', '--no-log', '--no-gotchas'], { env });
+  const r = runCli(['--datapack=' + pack, '--version=26.2', '--no-log', '--no-gotchas', '--no-write-report'], { env });
   assert.equal(r.status, 0);
   assert.match(r.stdout, /1 checked/);
 });

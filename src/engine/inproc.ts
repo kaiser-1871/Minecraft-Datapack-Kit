@@ -3,6 +3,7 @@
 // its Service, so behavior matches the LSP path — which is why --engine=lsp is kept
 // as the parity reference.
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as core from '@spyglassmc/core';
 import { getNodeJsExternals } from '@spyglassmc/core/lib/nodejs.js';
@@ -13,7 +14,7 @@ import { InProcFileWatcher } from './inproc-file-watcher.js';
 import { completionItemsOf } from '../completion-map.js';
 import type { Logger } from '@spyglassmc/core';
 import type { CompletionItemDTO, RawDiagnostic } from '../types.js';
-import type { CheckEngine, EngineCheckOptions, EngineCheckResult, EngineCompleteOptions, EngineSnapshot } from './types.js';
+import type { CheckEngine, EngineCheckOptions, EngineCheckResult, EngineCompleteOptions, EngineCheckTextOptions, EngineCheckTextResult, EngineSnapshot } from './types.js';
 
 /** Captures logger output (quiet by default) so we can recover the resolved version. */
 class RecordingLogger implements Logger {
@@ -156,6 +157,43 @@ export function createInProcEngine(): CheckEngine {
       }
     },
 
+    async checkText(opts: EngineCheckTextOptions): Promise<EngineCheckTextResult> {
+      const { datapack, version, rel, text } = opts;
+      const logger = new RecordingLogger();
+      const service = makeService(datapack, version, logger, opts.noGotchas === true);
+      const nUri = core.normalizeUri(pathToFileURL(join(datapack, 'data', rel)).href);
+      const diagnostics: RawDiagnostic[] = [];
+      const onError = ({ errors, uri }: { errors: readonly { severity: number; message: string; posRange: { start: { line: number; character: number }; end: { line: number; character: number } } }[]; uri: string }): void => {
+        if (core.normalizeUri(uri) !== nUri) return;
+        diagnostics.push(...errors.map(e => ({
+          severity: 4 - e.severity,
+          message: e.message,
+          range: {
+            start: { line: e.posRange.start.line, character: e.posRange.start.character },
+            end: { line: e.posRange.end.line, character: e.posRange.end.character },
+          },
+        })));
+      };
+      service.project.on('documentErrored', onError);
+      try {
+        await service.project.init();
+        const watcher = new InProcFileWatcher({
+          externals: service.project.externals,
+          locations: [service.project.projectRoots[0]],
+          predicate: (uri) => !service.project.shouldExclude(uri),
+        });
+        await service.project.ready({ projectRootsWatcher: watcher });
+        await service.project.onDidOpen(nUri, 'mcfunction', 1, text);
+        await service.project.ensureClientManagedChecked(nUri);
+        return {
+          resolvedVersion: service.project.ctx.loadedVersion ?? resolvedVersionOf(logger),
+          diagnostics,
+        };
+      } finally {
+        await service.project.close();
+      }
+    },
+
     async close(): Promise<void> { /* each op closes its own project */ },
   };
 
@@ -273,6 +311,27 @@ export function createInProcEnginePool(): CheckEngine {
         if (!dand) return [];
         const offset = dand.doc.offsetAt({ line: line - 1, character: column - 1 });
         return completionItemsOf(entry.service.complete(dand.node, dand.doc, offset));
+      });
+    },
+
+    async checkText(opts: EngineCheckTextOptions): Promise<EngineCheckTextResult> {
+      const { datapack, version, rel, text } = opts;
+      const entry = await acquire(datapack, version, opts.noGotchas === true);
+      return enqueue(entry, async () => {
+        const nUri = core.normalizeUri(pathToFileURL(join(datapack, 'data', rel)).href);
+        const uriToRel = new Map([[nUri, rel]]);
+        const diagnosticsByRel = new Map<string, RawDiagnostic[]>();
+        entry.uriToRel = uriToRel;
+        entry.current = diagnosticsByRel;
+        last = entry;
+        const next = (entry.docVersions.get(nUri) ?? 0) + 1;
+        entry.docVersions.set(nUri, next);
+        await entry.service.project.onDidOpen(nUri, 'mcfunction', next, text);
+        await entry.service.project.ensureClientManagedChecked(nUri);
+        return {
+          resolvedVersion: entry.service.project.ctx.loadedVersion ?? resolvedVersionOf(entry.logger),
+          diagnostics: diagnosticsByRel.get(rel) ?? [],
+        };
       });
     },
 

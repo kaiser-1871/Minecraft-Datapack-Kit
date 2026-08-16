@@ -19,6 +19,16 @@ export interface RawDiagnostic {
   severity?: number;
   message: string;
   range: IssueRange;
+  /** Stable diagnostic code, e.g. 'unknown-item-id' (optional; engine diagnostics may omit). */
+  code?: string;
+  /** Supporting file references for the diagnostic (optional). */
+  evidence?: string[];
+  /** Deterministic diagnostics get 1.0; heuristic/rule diagnostics use a lower value. */
+  confidence?: number;
+  /** Suggested fix, only shown when confidence >= 0.9 and suggestions are enabled. */
+  suggestion?: string | null;
+  /** Confidence in the suggestion itself (null when no suggestion). */
+  suggestion_confidence?: number | null;
 }
 
 export interface ReportIssue {
@@ -27,6 +37,37 @@ export interface ReportIssue {
   char: number;
   severity: string; // 'E' | 'W' | '·'
   message: string;
+  /** Stable diagnostic code, e.g. 'unknown-item-id'. */
+  code?: string;
+  /** Supporting file references for the diagnostic. */
+  evidence?: string[];
+  /** Deterministic diagnostics get 1.0; heuristic/rule diagnostics use a lower value. */
+  confidence?: number;
+  /** Suggested fix, only present when confidence >= 0.9 and suggestions are enabled. */
+  suggestion?: string | null;
+  /** Confidence in the suggestion itself (null when no suggestion). */
+  suggestion_confidence?: number | null;
+}
+
+/** Rule-lint alert (project-level inconsistency, not a syntax error). */
+export interface RuleAlert {
+  rule: string;
+  severity: 'warning' | 'error' | 'suggestion';
+  confidence: number;
+  message: string;
+  evidence: string[];
+  suggestion: string | null;
+  suggestion_confidence: number | null;
+  file?: string;
+  line?: number;
+  column?: number;
+}
+
+/** Result of a rule-lint run. */
+export interface RuleReport {
+  checked: number;
+  alerts: number;
+  items: RuleAlert[];
 }
 
 export interface GotchaIssue {

@@ -65,9 +65,10 @@ async function call(name, args) {
   return { parsed, isErr };
 }
 
-const TOOLS = ['check_datapack', 'query_syntax', 'complete_at', 'list_registry', 'list_versions', 'scan_gotchas', 'read_logs', 'get_block_states', 'get_vanilla_data'];
+const TOOLS = ['check_datapack', 'check_command', 'check_macro', 'lint_rules', 'write_report', 'diff_reports', 'query_syntax', 'complete_at', 'list_registry', 'list_versions', 'scan_gotchas', 'read_logs', 'get_block_states', 'get_vanilla_data'];
 
 let logRoot;
+let macroRoot;
 
 try {
   const init = await request('initialize', {
@@ -95,6 +96,12 @@ try {
   mkdirSync(join(logRoot, 'logs'), { recursive: true });
   writeFileSync(join(logRoot, 'logs', 'latest.log'), 'smoke line 1\nsmoke line 2\nsmoke line 3\n');
 
+  // A tiny datapack with one macro line so check_macro can be exercised.
+  macroRoot = mkdtempSync(join(tmpdir(), 'dpkit-mcp-macro-'));
+  mkdirSync(join(macroRoot, 'data', 'battle', 'function', 'archer'), { recursive: true });
+  writeFileSync(join(macroRoot, 'data', 'battle', 'function', 'archer', 'pierce_summon.mcfunction'),
+    '$summon minecraft:arrow ~ ~ ~ {Motion:[$(yaw),$(pitch),0.0]}\n');
+
   const which = process.argv[2];
   const targets = which ? [which] : TOOLS;
   const results = {};
@@ -107,6 +114,11 @@ try {
       list_registry: { registry: 'mob_effect', version: TEST_VERSION },
       complete_at: { datapack: FIXTURE, file: 'test/function/gotcha.mcfunction', line: 1, column: 24, version: TEST_VERSION },
       check_datapack: { datapack: FIXTURE, version: TEST_VERSION },
+      check_command: { command: 'say hello', version: TEST_VERSION },
+      check_macro: { macro: 'battle:archer/pierce_summon', version: TEST_VERSION, datapack: macroRoot, macro_args: { yaw: 0, pitch: 0 } },
+      lint_rules: { datapack: FIXTURE, rules: [] },
+      write_report: { report: { issues: [], summary: { errors: 0, warnings: 0 }, version: TEST_VERSION }, path: join(tmpdir(), 'dpkit-mcp-report.json') },
+      diff_reports: { old: null, current: { issues: [] } },
       read_logs: { launcher: 'default', minecraftRoot: logRoot, lines: 5 },
       get_block_states: { version: TEST_VERSION },
       get_vanilla_data: { version: TEST_VERSION, category: 'loot_table', search: 'ancient_city' },
@@ -142,6 +154,31 @@ try {
     assert(r && typeof r.summary?.errors === 'number' && typeof r.summary?.warnings === 'number',
       'check_datapack returns summary with error/warning counts');
     assert(r?.ok === true, 'check_datapack returns the ok:true envelope');
+  }
+  if (results.check_command) {
+    const r = results.check_command.parsed;
+    assert(r?.valid === true, 'check_command say hello → valid:true');
+    assert(r?.ok === true, 'check_command returns the ok:true envelope');
+  }
+  if (results.check_macro) {
+    const r = results.check_macro.parsed;
+    assert(r?.macro_fully_checked === true, 'check_macro fully expands with args');
+    assert(r?.ok === true, 'check_macro returns the ok:true envelope');
+  }
+  if (results.lint_rules) {
+    const r = results.lint_rules.parsed;
+    assert(Array.isArray(r?.items), 'lint_rules returns an items array');
+    assert(r?.ok === true, 'lint_rules returns the ok:true envelope');
+  }
+  if (results.write_report) {
+    const r = results.write_report.parsed;
+    assert(r?.written === true, 'write_report writes the report');
+    assert(r?.ok === true, 'write_report returns the ok:true envelope');
+  }
+  if (results.diff_reports) {
+    const r = results.diff_reports.parsed;
+    assert(r?.diff === null, 'diff_reports with null old → null diff');
+    assert(r?.ok === true, 'diff_reports returns the ok:true envelope');
   }
   if (results.read_logs) {
     const r = results.read_logs.parsed;
@@ -184,6 +221,7 @@ try {
   console.error('[mcp] smoke failed:', e.message);
 } finally {
   if (logRoot) rmSync(logRoot, { recursive: true, force: true });
+  try { rmSync(macroRoot, { recursive: true, force: true }); } catch {}
   setTimeout(() => child.kill(), 200);
 }
 

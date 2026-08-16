@@ -119,6 +119,10 @@ node dpkit.mjs --no-macro                        # 关闭 $ 宏行注册表 ID �
 node dpkit.mjs --no-entity-nbt                   # 关闭实体 NBT 结构检查（summon/data；默认开启）
 node dpkit.mjs --strict                          # 警告也导致退出码 1（CI 友好）
 node dpkit.mjs --no-log                          # 关闭游戏日志自检（默认开启）
+node dpkit.mjs --check-command="damage @s 5 battle:true_dmg" --version=26.2   # 校验一条完整命令
+node dpkit.mjs --macro="battle:archer/pierce_summon" --macro-args='{"yaw":0.0,"pitch":0.0}' --version=26.2  # 展开并校验宏函数
+node dpkit.mjs --rules=cleanup-id-coverage,on-eat-completeness --suggestions   # 项目一致性规则（默认全关）
+node dpkit.mjs --report=report.json             # 写报告文件（默认 dpkit_pvp_report.json；--no-write-report 关闭）
 node dpkit.mjs --watch                           # 文件变化时重新检查（池化引擎；Ctrl-C 停止）
 node dpkit.mjs --config=my.json                  # 指定配置文件
 node dpkit.mjs --baseline=my-baseline.json       # 指定 --delta 基线文件
@@ -394,9 +398,12 @@ node dpkit.mjs --dump=ref.md --version=1.21.4    # 为其他版本生成参考
 （把上面这段加到你的 MCP 客户端配置里，或项目的 `.mcp.json`。源码检出方式下，同一服务器
 可用 `npm run mcp` 启动。）
 
-工具：`check_datapack`、`query_syntax`、`complete_at`、`list_registry`、`list_versions`、
+工具：`check_datapack`、`check_command`、`check_macro`、`lint_rules`、`write_report`、
+`diff_reports`、`query_syntax`、`complete_at`、`list_registry`、`list_versions`、
 `scan_gotchas`、`read_logs`、`get_vanilla_data`、`get_block_states`。`check_datapack`
-还会返回宏行校验结果和 `coverage`（见上）；`list_registry` 一次调用列出某注册表的合法值
+还会返回宏行校验结果和 `coverage`（见上）；`check_command` 校验一条完整命令；
+`check_macro` 展开 `$` 宏行并逐条校验；`lint_rules` 运行项目一致性规则（默认全关）；
+`write_report` / `diff_reports` 负责报告落盘与差异对比；`list_registry` 一次调用列出某注册表的合法值
 （写 ID 之前先查，尤其是 `$` 宏行内部）；`read_logs` 追踪当前启动器的 latest.log
 （官方 / Prism / TLauncher，含轮转的 `.log.gz`）用于诊断运行时问题；`get_vanilla_data` /
 `get_block_states` 查询某个版本的原版游戏数据文件和方块状态属性（离线，来自共享缓存）。

@@ -122,6 +122,10 @@ node dpkit.mjs --no-macro                        # disable the $ macro-line regi
 node dpkit.mjs --no-entity-nbt                   # disable the entity-NBT schema check (summon/data; on by default)
 node dpkit.mjs --strict                          # warnings also exit 1 (CI-friendly)
 node dpkit.mjs --no-log                          # disable the game-log self-check (on by default)
+node dpkit.mjs --check-command="damage @s 5 battle:true_dmg" --version=26.2   # validate one complete command
+node dpkit.mjs --macro="battle:archer/pierce_summon" --macro-args='{"yaw":0.0,"pitch":0.0}' --version=26.2  # expand and validate a macro function
+node dpkit.mjs --rules=cleanup-id-coverage,on-eat-completeness --suggestions   # project-consistency rules (all off by default)
+node dpkit.mjs --report=report.json             # write a report file (default dpkit_pvp_report.json; --no-write-report disables)
 node dpkit.mjs --watch                           # re-check on file changes (pooled engine; Ctrl-C to stop)
 node dpkit.mjs --config=my.json                  # specify a config file
 node dpkit.mjs --baseline=my-baseline.json       # specify the --delta baseline file
@@ -415,9 +419,13 @@ instead of guessing syntax:
 (Add that to your MCP client's config, or a project `.mcp.json`. From a source checkout, the same
 server runs via `npm run mcp`.)
 
-Tools: `check_datapack`, `query_syntax`, `complete_at`, `list_registry`, `list_versions`,
+Tools: `check_datapack`, `check_command`, `check_macro`, `lint_rules`, `write_report`,
+`diff_reports`, `query_syntax`, `complete_at`, `list_registry`, `list_versions`,
 `scan_gotchas`, `read_logs`, `get_vanilla_data`, `get_block_states`. `check_datapack` also returns
-macro-line validation results and `coverage` (above); `list_registry` lists a registry's valid
+macro-line validation results and `coverage` (above); `check_command` validates one complete
+command string; `check_macro` expands `$` macro lines and validates each expanded command;
+`lint_rules` runs project-consistency rules (all off by default); `write_report` / `diff_reports`
+persist and compare report files; `list_registry` lists a registry's valid
 values in one call (check before writing an ID, especially inside `$` macro lines); `read_logs`
 tails the active launcher's latest.log (official / Prism / TLauncher, including rotated `.log.gz`)
 to diagnose runtime issues; `get_vanilla_data` / `get_block_states` query the vanilla game's data

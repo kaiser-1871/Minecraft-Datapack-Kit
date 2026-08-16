@@ -42,9 +42,28 @@ export interface EngineSnapshot {
   resolvedVersion: string | null;
 }
 
+export interface EngineCheckTextOptions {
+  datapack: string;
+  version: string;
+  /** data/-relative path used as the virtual document path, e.g. `__dpkit__/command.mcfunction`. */
+  rel: string;
+  /** Full text to check (one or more lines). */
+  text: string;
+  noGotchas?: boolean;
+  verbose?: boolean;
+  onLog?: (msg: string) => void;
+}
+
+export interface EngineCheckTextResult {
+  resolvedVersion: string | null;
+  diagnostics: RawDiagnostic[];
+}
+
 export interface CheckEngine {
   check(opts: EngineCheckOptions): Promise<EngineCheckResult>;
   complete(opts: EngineCompleteOptions): Promise<CompletionItemDTO[]>;
+  /** Optional: check an in-memory document (no temp file) and return its diagnostics. */
+  checkText?(opts: EngineCheckTextOptions): Promise<EngineCheckTextResult>;
   close(): Promise<void>;
   /** Optional incremental update: re-parse/bind/check ONE file in place (no full analysis). */
   updateFile?(opts: { rel: string; file: string; text: string }): Promise<void>;

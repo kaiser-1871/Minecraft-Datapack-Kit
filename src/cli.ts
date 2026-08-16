@@ -83,6 +83,13 @@ const { values: V } = (() => {
         'no-false-positives': { type: 'boolean' },
         'check-workspace': { type: 'boolean' },
         plugin: { type: 'string', multiple: true },
+        'check-command': { type: 'string' },
+        macro: { type: 'string' },
+        'macro-args': { type: 'string' },
+        report: { type: 'string' },
+        'no-write-report': { type: 'boolean' },
+        rules: { type: 'string' },
+        suggestions: { type: 'boolean' },
       },
       strict: true,
     });
@@ -117,6 +124,16 @@ let DP_SOURCE: 'cli' | 'env' | 'config' | 'auto' =
   : 'auto';
 let DATAPACK: string | null = V.datapack ?? cfgDatapack ?? detectDefaultDatapack(GAME_VERSION, cfg.minecraftRoot);
 
+const CHECK_COMMAND = V['check-command'];
+const CHECK_COMMAND_GIVEN = V['check-command'] !== undefined;
+const MACRO = V.macro;
+const MACRO_GIVEN = V.macro !== undefined;
+const MACRO_ARGS = V['macro-args'];
+const REPORT_FILE = V.report ?? 'dpkit_pvp_report.json';
+const WRITE_REPORT = V['no-write-report'] !== true;
+const RULES = V.rules;
+const SUGGESTIONS = V.suggestions === true;
+
 // #2: never silently check a stale/pointed-elsewhere datapack. A dead config/env path used to
 // either fail late or (worse) make a green report for the WRONG pack. Warn loudly, fall back to
 // auto-detection, and flag a home-dir config that points away from the more-relevant detected pack.
@@ -129,7 +146,7 @@ const datapackNeeded = !(
   V.syntax !== undefined || V.dump !== undefined || V['dump-all'] === true ||
   V.registry !== undefined || V.versions !== undefined || V['check-updates'] === true ||
   V['complete-inline'] !== undefined || V['cache-versions'] !== undefined
-);
+) && (MACRO_GIVEN || !CHECK_COMMAND_GIVEN);
 const samePath = (a: string, b: string): boolean => a.toLowerCase().replace(/\\/g, '/') === b.toLowerCase().replace(/\\/g, '/');
 if (datapackNeeded && (DP_SOURCE === 'config' || DP_SOURCE === 'env')) {
   const auto = detectDefaultDatapack(GAME_VERSION, cfg.minecraftRoot);
@@ -262,6 +279,13 @@ Options:
   --no-false-positives   Disable the built-in known-false-positive rule database
   --check-workspace      Also run a full, separate check for every --workspace datapack
   --plugin=<path>  Load a dpkit plugin module (.mjs/.js; repeatable; also settable in .dpkit.json)
+  --check-command="<cmd>"  Validate one complete command, e.g. --check-command="damage @s 5 battle:true_dmg"
+  --macro=<ns:path>  Expand and validate $ macro lines in a function, e.g. battle:archer/pierce_summon
+  --macro-args='{"var": value}'  Macro variable values for --macro (JSON object)
+  --rules=r1,r2     Enable project-consistency lint rules (default: all off), e.g. cleanup-id-coverage,on-eat-completeness
+  --suggestions     Also emit non-authoritative suggestions (only when confidence >= 0.9 and version data is full)
+  --report=<file>   Write the JSON report to <file> (default dpkit_pvp_report.json)
+  --no-write-report Disable writing the report file (--write-report is default)
   --watch          Re-check on file changes (directory datapacks only; incremental: changed files are re-analyzed; Ctrl-C to stop)
 
 Teach-the-AI modes (ground-truth syntax from the ${GAME_VERSION} command tree):
@@ -324,6 +348,8 @@ export async function main(): Promise<void> {
     if (OFFLINE) { await runOffline(); return; }
     if (COMPLETE) { await runComplete(); return; }
     if (COMPLETE_INLINE_GIVEN) { await runCompleteInline(); return; }
+    if (CHECK_COMMAND_GIVEN) { await runCheckCommand(); return; }
+    if (MACRO_GIVEN) { await runCheckMacro(); return; }
     if (CHECK_UPDATES) { await runCheckUpdates(); return; }
     if (WATCH) { await runWatch(); return; }
     await runCheck();
@@ -556,6 +582,67 @@ async function runCheckUpdates(): Promise<void> {
   }
 }
 
+// ---------- check-command / check-macro ----------
+async function runCheckCommand(): Promise<void> {
+  const command = (CHECK_COMMAND ?? '').trim();
+  if (!command) throw new api.DpkitError('[check] --check-command needs a command string, e.g. --check-command="damage @s 5 battle:true_dmg"', api.EXIT_USAGE);
+  const result = await api.checkCommand({
+    command,
+    version: GAME_VERSION,
+    datapack: DATAPACK ?? undefined,
+    suggestions: SUGGESTIONS,
+  });
+  if (JSON_OUT) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    out(`command : ${result.command}`);
+    out(`version : ${result.version} (${result.version_profile})`);
+    out(`valid   : ${result.valid}  verification=${result.verification}  can_give_suggestions=${result.can_give_suggestions}`);
+    for (const e of result.errors) out(`  [error:${e.line}:${e.column}] ${e.message}`);
+    for (const w of result.warnings) out(`  [warning:${w.line}:${w.column}] ${w.message}`);
+    for (const s of result.suggestions) out(`  [suggestion:${s.line}:${s.column}] ${s.message}`);
+  }
+  if (!result.valid) process.exitCode = 1;
+}
+
+async function runCheckMacro(): Promise<void> {
+  const macro = (MACRO ?? '').trim();
+  if (!macro) throw new api.DpkitError('[check] --macro needs a namespaced function id, e.g. --macro="battle:archer/pierce_summon"', api.EXIT_USAGE);
+  let macroArgs: Record<string, unknown> | undefined;
+  if (MACRO_ARGS !== undefined) {
+    try {
+      const parsed = JSON.parse(MACRO_ARGS);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('must be a JSON object');
+      }
+      macroArgs = parsed as Record<string, unknown>;
+    } catch (err) {
+      throw new api.DpkitError(`[check] --macro-args must be a JSON object: ${(err as Error).message}`, api.EXIT_USAGE);
+    }
+  }
+  const result = await api.checkMacro({
+    macro,
+    version: GAME_VERSION,
+    datapack: requireDatapack(),
+    macroArgs,
+    suggestions: SUGGESTIONS,
+  });
+  if (JSON_OUT) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    out(`macro   : ${result.macro}`);
+    out(`checked : ${result.macro_fully_checked ? 'fully expanded' : 'partial/syntax-only (unverified lines marked)'}`);
+    for (const ln of result.lines) {
+      const status = ln.checked ? '✓' : `⚠ ${ln.unverified_reason ?? 'unverified'}`;
+      out(`  ${ln.line}: ${status} ${ln.original.trim()}`);
+      if (ln.result && !ln.result.valid) {
+        for (const e of ln.result.errors) out(`    [error:${e.line}:${e.column}] ${e.message}`);
+      }
+    }
+  }
+  if (result.errors.length > 0) process.exitCode = 1;
+}
+
 // ---------- check ----------
 async function runCheck(): Promise<void> {
   const workspaceList = [...(cfg.workspace ?? []), ...WORKSPACE, ...(cfg.additionalDatapacks ?? []), ...ADDITIONAL_DATAPACKS];
@@ -581,9 +668,19 @@ async function runCheck(): Promise<void> {
     cacheMiss: CACHE_MISS as api.CacheMissPolicy,
     falsePositives: NO_FALSE_POSITIVES ? false : cfg.falsePositives,
     plugins: PLUGINS,
+    rules: api.parseRuleList(RULES),
+    suggestions: SUGGESTIONS,
     onLog: out,
   } satisfies Parameters<typeof api.checkDatapack>[0];
   const result = await api.checkDatapack(mainOptions);
+  if (WRITE_REPORT) {
+    try {
+      const wr = api.writeReport(result.report, REPORT_FILE);
+      if (VERBOSE) out(`[check] report written → ${wr.path}${wr.diff_from_last ? ` (diff: +${wr.diff_from_last.new_errors} new errors, -${wr.diff_from_last.fixed_errors} fixed)` : ' (no previous report)'}`);
+    } catch (err) {
+      console.error(`[check] could not write report ${REPORT_FILE}: ${(err as Error).message}`);
+    }
+  }
   const workspaceResults: api.CheckResult[] = [];
   if (CHECK_WORKSPACE) {
     for (const pack of workspaceList) {
@@ -683,6 +780,8 @@ async function runWatch(): Promise<void> {
     cacheMiss: CACHE_MISS as api.CacheMissPolicy,
     falsePositives: NO_FALSE_POSITIVES ? false : cfg.falsePositives,
     plugins: PLUGINS,
+    rules: api.parseRuleList(RULES),
+    suggestions: SUGGESTIONS,
     onLog: out,
     ...extra,
   });
@@ -805,7 +904,7 @@ function renderText(result: api.CheckResult): void {
   if (vi.fallback && vi.uncheckedRange) console.log(`         : ⚠ ${vi.uncheckedRange} — NOT checked with the requested version`);
   if (!vi.fallback) console.log(`         : unchecked range: none (target version was checked)`);
   console.log(`files    : ${report.files.checked} checked, ${report.files.clean} clean${report.delta ? ` · delta: ${report.delta.changedFiles} changed, ${report.delta.resolvedFiles} resolved` : ''}`);
-  console.log(`summary  : ${report.summary.errors} error(s) · ${report.summary.warnings} warning(s) · ${report.summary.ignored} ignored · ${report.summary.internalFailures} internal-failure · gotchas ${report.summary.gotchas} · symbols-resolved ${report.summary.symbolsResolved} · scope-hints ${report.summary.scopeHints}`);
+  console.log(`summary  : ${report.summary.errors} error(s) · ${report.summary.warnings} warning(s) · ${report.summary.ignored} ignored · ${report.summary.internalFailures} internal-failure · gotchas ${report.summary.gotchas} · symbols-resolved ${report.summary.symbolsResolved} · scope-hints ${report.summary.scopeHints}${report.summary.rule_alerts !== undefined ? ` · rule-alerts ${report.summary.rule_alerts}` : ''}`);
   if (report.delta) {
     console.log(`baseline : ${report.delta.baseline.errors} error / ${report.delta.baseline.warnings} warning`);
     console.log(`current  : ${report.delta.current.errors} error / ${report.delta.current.warnings} warning`);
@@ -869,6 +968,14 @@ function renderText(result: api.CheckResult): void {
   if (report.scopeHints.length) {
     console.log(`\n== scope hints (not errors/warnings; add --workspace= to resolve) ==`);
     for (const h of report.scopeHints) console.log(`  [${h.file}:${h.line}] ${h.message}`);
+  }
+  if (report.rules && report.rules.items.length) {
+    console.log(`\n== project rules (${report.rules.checked} rule(s) checked, ${report.rules.alerts} alert(s); --rules to enable) ==`);
+    for (const r of report.rules.items) {
+      const loc = r.file ? ` ${r.file}${r.line ? `:${r.line}` : ''}` : '';
+      console.log(`  [rule:${r.rule}] (${r.severity}, confidence ${r.confidence}) ${r.message}${loc}`);
+      for (const ev of r.evidence) console.log(`    evidence: ${ev}`);
+    }
   }
   if (report.gotchas.length) {
     console.log(`\n== ${verLabel} known-gotcha scan (heuristic, not counted as errors; --no-gotchas to disable) ==`);

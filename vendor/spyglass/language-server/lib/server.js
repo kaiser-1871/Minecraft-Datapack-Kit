@@ -180,7 +180,9 @@ connection.onInitialized(async () => {
         service.project.on('configChanged', async ({ oldConfig, newConfig }) => {
             const oldExclude = new Set(oldConfig.env.exclude);
             const newExclude = new Set(newConfig.env.exclude);
-            if (oldExclude.size === newExclude.size && oldExclude.isSubsetOf(newExclude)) {
+            // dpkit patch: Set.prototype.isSubsetOf is ES2024 (Node 22+); Node 20 lacks it and
+            // the LSP server crashes on configChanged. Use the equivalent ES2020 form.
+            if (oldExclude.size === newExclude.size && [...oldExclude].every(v => newExclude.has(v))) {
                 // `env.exclude` has not changed. Skip.
                 return;
             }

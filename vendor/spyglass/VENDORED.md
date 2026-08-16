@@ -32,6 +32,11 @@ upstream checkout, re-apply them first (see CLAUDE.md in the repo root for the s
    partitions into its separate gotchas report section.
 3. `packages/java-edition/src/mcfunction/index.ts` — import + re-export `./linter.js` and
    call `linter.register(meta)` inside `initialize`.
+4. `packages/language-server/src/server.ts` (built output: `language-server/lib/server.js`) —
+   the `configChanged` watcher used `Set.prototype.isSubsetOf`, an ES2024 API that does not
+   exist on Node 20 (the LSP server crashed with `oldExclude.isSubsetOf is not a function`
+   on Node 20 CI runs). Replaced with the equivalent ES2020 form:
+   `[...oldExclude].every(v => newExclude.has(v))`.
 
 ## Updating the vendored engine
 

@@ -10,6 +10,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Fixed cache location (NOT under $HOME): cli-smoke tests isolate HOME, and on Linux
+      # env-paths resolves the Spyglass cache from XDG_CACHE_HOME / ~/.cache — without this
+      # the tests can't see the pre-warmed data and every offline query fails.
+      XDG_CACHE_HOME: ${{ runner.temp }}/spyglass-cache
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.ref }}-node${{ matrix.node-version }}
       cancel-in-progress: false
@@ -25,7 +30,19 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: node dpkit.mjs --cache-versions=1.14,1.15.2,1.16.5,1.18.2,1.19.4,1.20.4,1.21.4,1.21.11,26.2
+      # Three parallel matrix jobs pre-warming the same upstream endpoints can hit transient
+      # HTTP 502s; --cache-versions is idempotent (skips already-cached versions), so retry
+      # until every version is cached.
+      - name: Pre-warm version data (retry transient 502s)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            echo "=== cache-versions attempt $attempt ==="
+            if node dpkit.mjs --cache-versions=1.14,1.15.2,1.16.5,1.18.2,1.19.4,1.20.4,1.21.4,1.21.11,26.2; then
+              echo "pre-warm complete"
+              break
+            fi
+            sleep 15
+          done
       - run: node --test "tests/**/*.test.mjs"
       - name: multi-version matrix
         env:

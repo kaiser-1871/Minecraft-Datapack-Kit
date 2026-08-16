@@ -5,7 +5,9 @@
 //
 // Env hygiene: every case isolates USERPROFILE/HOME/APPDATA into a fresh temp dir so no
 // developer home config or .minecraft leaks in. LOCALAPPDATA is deliberately PRESERVED —
-// it holds the Spyglass cache the offline teach modes read from.
+// it holds the Spyglass cache the offline teach modes read from. On Linux/macOS that cache
+// lives under XDG_CACHE_HOME / ~/.cache (env-paths), which HOME isolation would hide — so
+// point XDG_CACHE_HOME at the real cache dir unless CI already set it.
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -33,6 +35,11 @@ function freshHome() {
     DPKIT_DATAPACK: '',
     DPKIT_VERSION: '',
   };
+  if (process.platform !== 'win32' && !process.env.XDG_CACHE_HOME && process.env.HOME) {
+    // env-paths falls back to ~/.cache for the Spyglass cache; keep it visible for the
+    // offline teach-mode tests (mirrors the LOCALAPPDATA preservation on Windows).
+    env.XDG_CACHE_HOME = join(process.env.HOME, '.cache');
+  }
   return { home, env };
 }
 

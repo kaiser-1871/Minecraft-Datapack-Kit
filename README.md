@@ -4,11 +4,12 @@
 [![npm version](https://img.shields.io/npm/v/dpkit-mc)](https://www.npmjs.com/package/dpkit-mc)
 
 **dpkit** checks **any** Minecraft datapack against every game version the upstream data provider
-covers (**1.14 through the latest release/snapshot**), with the exact same engine as the
-**Datapack Helper Plus (Spyglass)** VS Code extension — diagnostics are verified identical by a
-parity gate (in-process engine vs LSP, per-file signature equality). 1.13 and older have no
-command-tree/registry data upstream and are rejected explicitly rather than mis-checked. Unlike
-the editor, dpkit runs **anywhere**:
+covers (**1.14 through the latest release/snapshot**), running the **exact same engine** as the
+[Datapack Helper Plus (Spyglass)](https://marketplace.visualstudio.com/items?itemName=spgoding.datapack-language-server)
+VS Code extension — the engine is vendored in this repo ([Built on Spyglass](#built-on-spyglass-the-datapack-helper-plus-engine)
+below), and diagnostics are verified identical by a parity gate (in-process engine vs LSP, per-file
+signature equality). 1.13 and older have no command-tree/registry data upstream and are rejected
+explicitly rather than mis-checked. Unlike the editor, dpkit runs **anywhere**:
 
 - **CI gate**: `--strict` plus exit codes `0/1/2/4` turn a check into a GitHub Actions gate.
 - **Deeper checks the editor never shows**: `$` macro-line registry validation, per-version entity-NBT
@@ -21,6 +22,31 @@ the editor, dpkit runs **anywhere**:
 
 > The tool is **universal**: which datapack/version it checks is decided by flags / env / `.dpkit.json`,
 > never hard-coded — the repo ships no save/datapack content of its own.
+
+## Built on Spyglass (the Datapack Helper Plus engine)
+
+dpkit is **not a from-scratch parser** — it runs the real engine behind the
+[Datapack Helper Plus](https://marketplace.visualstudio.com/items?itemName=spgoding.datapack-language-server)
+VS Code extension, built from the MIT-licensed [SpyglassMC/Spyglass](https://github.com/SpyglassMC/Spyglass)
+project (the successor of [SpyglassMC/vscode-datapack](https://github.com/SpyglassMC/vscode-datapack)):
+
+- **Vendored engine, zero external deps**: the built output of the 8 `@spyglassmc/*` packages
+  (core / java-edition / json / locales / mcdoc / mcfunction / nbt / language-server) is committed
+  in `vendor/spyglass/`, so the repo builds and checks datapacks with **no Spyglass checkout and
+  no network** — see [vendor/spyglass/VENDORED.md](vendor/spyglass/VENDORED.md) for the origin,
+  license, and the small local patch list.
+- **Same per-version data**: command trees, registries, block states, and the `vanilla-mcdoc`
+  NBT schema all come from the same [Spyglass API](https://api.spyglassmc.com) the editor uses,
+  cached locally — a `--syntax` / `--registry` answer from dpkit is identical to what VS Code shows.
+- **Parity is verified, not assumed**: `npm run parity` compares in-process vs LSP diagnostics
+  per file (issue-signature equality), so "same engine" is a tested property, not a claim.
+- **Beyond the editor**: on top of the Spyglass engine, dpkit adds the checks the editor never
+  shows — `$` macro-line registry validation, per-version entity-NBT schema checks, structure-NBT
+  parsing, the known-gotcha scan, and the game-log self-check (see
+  [Deeper checks](#deeper-checks-the-editor-engine-does-not-show)).
+
+Spyglass is © SPGoding and contributors (MIT) — many thanks to the team for open-sourcing the
+engine and its per-version data pipeline.
 
 ## Install
 
@@ -516,5 +542,7 @@ a snapshot newer than the latest release.
 
 [ISC](LICENSE) — Copyright (c) 2026 dpkit contributors.
 
-This project bundles third-party code (the vendored Spyglass engine and `@zip.js/zip.js`) whose
-licenses are reproduced in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+This project is built on the **MIT-licensed [Spyglass](https://github.com/SpyglassMC/Spyglass)
+engine** (© SPGoding and contributors) and bundles third-party code (the vendored Spyglass
+engine and `@zip.js/zip.js`) whose licenses are reproduced in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

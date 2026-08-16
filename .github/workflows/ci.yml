@@ -14,7 +14,9 @@ jobs:
       # Fixed cache location (NOT under $HOME): cli-smoke tests isolate HOME, and on Linux
       # env-paths resolves the Spyglass cache from XDG_CACHE_HOME / ~/.cache — without this
       # the tests can't see the pre-warmed data and every offline query fails.
-      XDG_CACHE_HOME: ${{ runner.temp }}/spyglass-cache
+      # (runner.temp is NOT available in job-level env — only in step-level env — so use a
+      # stable /tmp path instead of ${{ runner.temp }}.)
+      XDG_CACHE_HOME: /tmp/spyglass-cache
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.ref }}-node${{ matrix.node-version }}
       cancel-in-progress: false

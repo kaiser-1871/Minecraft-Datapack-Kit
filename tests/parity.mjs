@@ -17,7 +17,7 @@ let lsp, inproc;
 try {
   console.log(`[parity] datapack=${datapack} version=${version}`);
   console.log('[parity] running LSP engine…');
-  lsp = await checkDatapack({ datapack, version, engine: 'lsp', noLog: true });
+  lsp = await checkDatapack({ datapack, version, engine: 'lsp', noLog: true, verbose: true });
   console.log(`[parity]   LSP done in ${((Date.now() - started) / 1000).toFixed(1)}s`);
   const t1 = Date.now();
   console.log('[parity] running in-process engine…');

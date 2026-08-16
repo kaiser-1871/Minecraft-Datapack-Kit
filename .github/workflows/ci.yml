@@ -33,19 +33,31 @@ jobs:
       - run: npm ci
       - run: npm run build
       # Three parallel matrix jobs pre-warming the same upstream endpoints can hit transient
-      # HTTP 502s; --cache-versions is idempotent (skips already-cached versions), so retry
-      # until every version is cached.
+      # HTTP 502s (upstream throttling — verified: the same downloads succeed locally and in
+      # single-job runs); --cache-versions is idempotent (skips already-cached versions), so
+      # retry until every version is cached. The loop must fail loudly when it never succeeds
+      # (a trailing `sleep 15` would otherwise make the step exit 0 with data still missing).
       - name: Pre-warm version data (retry transient 502s)
         run: |
-          for attempt in 1 2 3 4 5; do
+          ok=0
+          for attempt in 1 2 3 4 5 6 7 8; do
             echo "=== cache-versions attempt $attempt ==="
             if node dpkit.mjs --cache-versions=1.14,1.15.2,1.16.5,1.18.2,1.19.4,1.20.4,1.21.4,1.21.11,26.2; then
               echo "pre-warm complete"
+              ok=1
               break
             fi
-            sleep 15
+            sleep 20
           done
-      - run: node --test "tests/**/*.test.mjs"
+          if [ "$ok" != "1" ]; then
+            echo "::error::pre-warm failed after 8 attempts"
+            exit 1
+          fi
+      # Note: bare `node --test` (no args) recursively finds tests/**/*.test.mjs on Node
+      # 20/22/24 alike — Node 20 does NOT support glob arguments (tests/**/*.test.mjs), and
+      # directory args misbehave on some platforms. Non-.test. files (multi-version.spec.mjs,
+      # mcp-smoke.mjs, parity.mjs) are intentionally excluded; they run as separate steps.
+      - run: node --test
       - name: multi-version matrix
         env:
           DPKIT_TEST_VERSIONS: 1.14,1.15.2,1.16.5,1.18.2,1.19.4,1.20.4,1.21.4,1.21.11,26.2

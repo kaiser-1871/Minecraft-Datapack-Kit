@@ -24,7 +24,7 @@
   "scripts": {
     "build": "tsc --emitDeclarationOnly && node scripts/build-bundle.mjs",
     "build:watch": "tsc --emitDeclarationOnly --watch",
-    "test": "npm run build && node --test \"tests/**/*.test.mjs\" && node tests/mcp-smoke.mjs",
+    "test": "npm run build && node --test && node tests/mcp-smoke.mjs",
     "test:versions": "npm run build && node --test tests/multi-version.spec.mjs",
     "test:all": "npm test && npm run test:versions && npm run parity",
     "mcp": "node dist/mcp.js",

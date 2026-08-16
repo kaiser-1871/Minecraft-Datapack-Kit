@@ -85,7 +85,7 @@ jobs:
         if: matrix.node-version == 20
         run: |
           echo "=== bare server start, capture stderr ==="
-          timeout 15 node dist/spyglass-server.js --stdio </dev/null >/tmp/lsp-out.txt 2>/tmp/lsp-err.txt
+          timeout 15 node dist/spyglass-server.js --stdio </dev/null >/tmp/lsp-out.txt 2>/tmp/lsp-err.txt || true
           echo "exit=$?"
           echo "--- stderr ---"
           head -40 /tmp/lsp-err.txt

@@ -4,6 +4,26 @@
 
 ### Added
 
+- Full command validation: `--check-command="<cmd>"` validates one complete command with
+  `verification` (`full`/`partial`/`none`) and evidence-carrying diagnostics; exposed as the MCP
+  `check_command` tool.
+- Macro expansion validation: `--macro=<ns:path>` + `--macro-args='{...}'` expands `$` macro
+  lines and validates each expanded command; missing args are marked `unverified`, never errors;
+  exposed as the MCP `check_macro` tool.
+- Project rule engine (`src/rules.ts`): built-in `cleanup-id-coverage`, `on-eat-completeness`,
+  `advancement-revoke-coverage`, `attribute-modifier-cleanup`, and `schedule-cleanup` rules,
+  all off by default via `--rules=...`; exposed as the MCP `lint_rules` tool.
+- Automatic report file writing + diff: `--write-report` is now the default, `--no-write-report`
+  disables it, `--report=<file>` sets the path; each run reads the previous report and writes
+  `diff_from_last`; exposed as MCP `write_report` and `diff_reports`.
+- Version capability matrix: reports `version_profile` (`full`/`partial`/`none`/`ambiguous`),
+  `registry_coverage`, `unchecked_registry_ids`, and `can_give_suggestions`; incomplete or
+  ambiguous version data switches dpkit into conservative mode and suppresses suggestions.
+- Enhanced diagnostics: `code`, `evidence`, `confidence`, `suggestion`, and
+  `suggestion_confidence` fields on issues and rule alerts.
+- `--suggestions` flag: suggestion output is opt-in and only emitted when confidence >= 0.9 and
+  version data is complete.
+
 - Plugin API (`src/plugins.ts`): plugins can run `setup` / `beforeCheck` / `afterCheck` around a
   check; loadable from the API, `.dpkit.json` `plugins`, or `--plugin=<path>`. Design inspired by
   [mcbeet/beet](https://github.com/mcbeet/beet)'s plugin/`Context` pipeline.

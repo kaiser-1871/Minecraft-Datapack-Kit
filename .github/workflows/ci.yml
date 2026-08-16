@@ -32,12 +32,22 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # Reuse the pre-warmed Spyglass cache across runs: api.spyglassmc.com throttles the
+      # parallel matrix jobs (transient 502s on old-version data), and a full pre-warm takes
+      # minutes. With actions/cache, only the first run (or a cache miss) downloads.
+      - name: Restore Spyglass cache
+        id: spyglass-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/spyglass-cache
+          key: spyglass-cache-${{ runner.os }}-${{ hashFiles('vendor/spyglass/BUILD.json') }}
       # Three parallel matrix jobs pre-warming the same upstream endpoints can hit transient
       # HTTP 502s (upstream throttling — verified: the same downloads succeed locally and in
       # single-job runs); --cache-versions is idempotent (skips already-cached versions), so
       # retry until every version is cached. The loop must fail loudly when it never succeeds
       # (a trailing `sleep 15` would otherwise make the step exit 0 with data still missing).
       - name: Pre-warm version data (retry transient 502s)
+        if: steps.spyglass-cache.outputs.cache-hit != 'true'
         run: |
           ok=0
           for attempt in 1 2 3 4 5 6 7 8; do
@@ -53,6 +63,14 @@ jobs:
             echo "::error::pre-warm failed after 8 attempts"
             exit 1
           fi
+      - name: Save Spyglass cache
+        # Only the Node 22 job saves — three parallel jobs writing the same cache key
+        # would race (last-writer-wins) and waste time re-uploading.
+        if: always() && steps.spyglass-cache.outputs.cache-hit != 'true' && matrix.node-version == 22
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/spyglass-cache
+          key: spyglass-cache-${{ runner.os }}-${{ hashFiles('vendor/spyglass/BUILD.json') }}
       # Note: bare `node --test` (no args) recursively finds tests/**/*.test.mjs on Node
       # 20/22/24 alike — Node 20 does NOT support glob arguments (tests/**/*.test.mjs), and
       # directory args misbehave on some platforms. Non-.test. files (multi-version.spec.mjs,

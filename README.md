@@ -8,10 +8,10 @@
 > **⚠️ Testing status**: the author has personally tested dpkit only against their own datapack
 > for **Minecraft 26.2**. Other versions (1.14 through the latest) are supported via the upstream
 > per-version engine data but have **not** been exhaustively verified by the author. Most features
-> — especially new version/feature updates — are assembled with heavy AI assistance
-> (“AI 缝缝补补”) and may contain untested edge cases. **Please verify results yourself before
-> relying on them in production or CI.** Testing and feedback on other versions are very welcome!
-> Please report issues at the [issue tracker](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/issues).
+> — especially new version/feature updates — are assembled with heavy AI assistance and may
+> contain untested edge cases. **Please verify results yourself before relying on them in
+> production or CI.** Testing and feedback on other versions are very welcome! Please report
+> issues at the [issue tracker](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/issues).
 
 **dpkit** (short for **Minecraft Datapack Kit**) checks **any** Minecraft datapack against every
 game version the upstream data provider covers (**1.14 through the latest release/snapshot**),

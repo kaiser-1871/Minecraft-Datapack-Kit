@@ -81,6 +81,20 @@ jobs:
           DPKIT_TEST_VERSIONS: 1.14,1.15.2,1.16.5,1.18.2,1.19.4,1.20.4,1.21.4,1.21.11,26.2
         run: node --test tests/multi-version.spec.mjs
       - run: node tests/mcp-smoke.mjs
+      - name: Debug LSP server startup (Node 20 diagnostics)
+        if: matrix.node-version == 20
+        run: |
+          echo "=== bare server start, capture stderr ==="
+          timeout 15 node dist/spyglass-server.js --stdio </dev/null >/tmp/lsp-out.txt 2>/tmp/lsp-err.txt
+          echo "exit=$?"
+          echo "--- stderr ---"
+          head -40 /tmp/lsp-err.txt
+          echo "--- stdout ---"
+          head -20 /tmp/lsp-out.txt
+          echo "=== node version ==="
+          node --version
+          echo "=== cache dir ==="
+          ls -la /tmp/spyglass-cache/spyglassmc-nodejs/http/ 2>&1 | head -10
       - name: parity across cached releases
         run: |
           for v in 1.14 1.15.2 1.16.5 1.18.2 1.19.4 1.20.4 1.21.4 1.21.11 26.2; do

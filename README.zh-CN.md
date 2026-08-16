@@ -511,7 +511,7 @@ node dpkit.mjs --version="latest snapshot"   # 始终跟随最新快照
 
 ## 许可证
 
-[ISC](LICENSE) — Copyright (c) 2026 dpkit contributors.
+[MIT](LICENSE) — Copyright (c) 2026 dpkit contributors.
 
 本项目构建于 **MIT 协议的 [Spyglass](https://github.com/SpyglassMC/Spyglass) 引擎**
 （© SPGoding 及贡献者）之上，并打包了第三方代码（内置的 Spyglass 引擎和

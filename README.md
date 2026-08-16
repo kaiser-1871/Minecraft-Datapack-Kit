@@ -548,7 +548,7 @@ a snapshot newer than the latest release.
 
 ## License
 
-[ISC](LICENSE) — Copyright (c) 2026 dpkit contributors.
+[MIT](LICENSE) — Copyright (c) 2026 dpkit contributors.
 
 This project is built on the **MIT-licensed [Spyglass](https://github.com/SpyglassMC/Spyglass)
 engine** (© SPGoding and contributors) and bundles third-party code (the vendored Spyglass

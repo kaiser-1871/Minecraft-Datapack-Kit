@@ -7,13 +7,40 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { cacheDir, cacheIndexSidecarPath, readCachedBytes } from './cache.js';
+import { cacheDir, cacheIndexPath, cacheIndexSidecarPath, readCachedBytes } from './cache.js';
 import { CommandDataNotCachedError, resolveConcreteVersion } from './syntax.js';
 
 export const VERSIONS_LIST_URL = 'https://api.spyglassmc.com/mcje/versions';
 // Old-version command data can take 10s+ to generate server-side; 5s was too tight and made
 // 1.15/1.17/1.18 look unsupported. Keep a generous ceiling but still bounded for offline UX.
 const FETCH_TIMEOUT_MS = 30000;
+
+/** Spyglass's HttpCache.match() requires every index entry to be shaped like this
+ * (CacheIndex.assert in NodeJsExternals.js). dpkit mirrors it so the engine's own index.json
+ * can carry entries dpkit downloaded. */
+interface EngineIndexEntry {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  sha1: string;
+  cacheTime: number;
+}
+
+/**
+ * Merge one URL entry into an http index file (engine index.json or dpkit's sidecar),
+ * preserving all other entries. Read-modify-write with a temp-file rename so no reader
+ * ever sees a half-written file (same discipline the engine itself uses).
+ */
+function mergeIndexEntry(file: string, url: string, entry: EngineIndexEntry): void {
+  let index: { index?: Record<string, Record<string, unknown>> } = {};
+  try { index = JSON.parse(readFileSync(file, 'utf8')); } catch { index = {}; }
+  index.index ??= {};
+  index.index[url] ??= {};
+  index.index[url][''] = entry;
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, JSON.stringify(index));
+  renameSync(tmp, file);
+}
 
 /** Fetch a URL and store it in Spyglass's cache layout (http/objects + an index.json
  * entry), so both the offline readers and the engine see it on their next read. The
@@ -36,13 +63,25 @@ export async function downloadToCache(url: string): Promise<{ ok: boolean; error
   // index.json from its own in-memory state (dropping entries it didn't download), and two
   // concurrent writers on one file lose each other's entries. The sidecar is dpkit-only, so
   // neither race exists. Write-then-rename so no reader sees a half-written file.
-  let index: { index?: Record<string, Record<string, unknown>> } = {};
-  try { index = JSON.parse(readFileSync(cacheIndexSidecarPath(), 'utf8')); } catch { index = {}; }
-  index.index ??= {};
-  index.index[url] = { '': { status: res.status, statusText: res.statusText, sha1 } };
-  const tmp = `${cacheIndexSidecarPath()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(index));
-  renameSync(tmp, cacheIndexSidecarPath());
+  const headers: Record<string, string> = {};
+  res.headers.forEach((v, k) => { headers[k] = v; });
+  const entry: EngineIndexEntry = {
+    status: res.status,
+    statusText: res.statusText,
+    headers,
+    sha1,
+    cacheTime: Date.now(),
+  };
+  mergeIndexEntry(cacheIndexSidecarPath(), url, entry);
+  // ALSO merge into the engine's own index.json: the Spyglass HttpCache only reads that
+  // file (never the sidecar), so without this a freshly pre-warmed version is invisible to
+  // the engine and it re-fetches on init — which times out for old versions whose data
+  // takes >10s to generate server-side (the engine's own fetch budget is ~15s total). With
+  // an entry present, the engine's fetchWithCache falls back to this cached response when
+  // the network attempt fails (stale-cache fallback), so pre-warmed data actually protects
+  // engine init. Best-effort: a concurrent engine write could drop the entry, which only
+  // means a re-fetch (no corruption — same read-modify-write discipline as the engine).
+  try { mergeIndexEntry(cacheIndexPath(), url, entry); } catch { /* best-effort */ }
   return { ok: true, error: '' };
 }
 

@@ -536,7 +536,6 @@ a snapshot newer than the latest release.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, build/test commands, commit conventions, and the Spyglass vendoring flow.
 - [SECURITY.md](SECURITY.md) — how to report a security issue (privately, first).
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1.
-- [PUBLISHING.md](PUBLISHING.md) — the maintainer checklist for releasing to GitHub and npm.
 
 ## License
 

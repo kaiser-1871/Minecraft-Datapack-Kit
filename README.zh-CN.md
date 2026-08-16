@@ -6,8 +6,10 @@
 [![npm version](https://img.shields.io/npm/v/dpkit-mc)](https://www.npmjs.com/package/dpkit-mc)
 
 > **⚠️ 测试状态**：作者本人仅在自己的 **Minecraft 26.2** 版本数据包上实际测试过 dpkit。
-> 其他版本（1.14 ~ 最新）依赖上游引擎的逐版本数据，未经作者逐一实测——
-> **欢迎大家在不同版本上测试并反馈问题！** 有问题请到
+> 其他版本（1.14 ~ 最新）依赖上游引擎的逐版本数据，未经作者逐一实测。
+> 项目里**大部分功能，尤其是每次新版本/新功能的更新，都是靠 AI 缝缝补补完成的**，
+> 可能存在未实测的边界情况。**请在使用前自行验证结果，不要直接把它当作生产/CI 的绝对权威。**
+> 当然，也**欢迎大家在不同版本上测试并反馈问题！** 有问题请到
 > [Issues](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/issues) 提交。
 
 **dpkit**（全称 **Minecraft Datapack Kit**，Minecraft 数据包工具包）可以检查**任意** Minecraft

@@ -46,12 +46,12 @@
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kaiser-1871/MC-DPKIT.git"
+    "url": "git+https://github.com/kaiser-1871/Minecraft-Datapack-Kit.git"
   },
   "bugs": {
-    "url": "https://github.com/kaiser-1871/MC-DPKIT/issues"
+    "url": "https://github.com/kaiser-1871/Minecraft-Datapack-Kit/issues"
   },
-  "homepage": "https://github.com/kaiser-1871/MC-DPKIT#readme",
+  "homepage": "https://github.com/kaiser-1871/Minecraft-Datapack-Kit#readme",
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^26.2.0",

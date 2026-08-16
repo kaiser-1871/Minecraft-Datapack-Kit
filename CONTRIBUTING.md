@@ -13,7 +13,7 @@ Requirements:
 - npm (comes with Node)
 
 ```bash
-git clone https://github.com/kaiser-1871/MC-DPKIT.git
+git clone https://github.com/kaiser-1871/Minecraft-Datapack-Kit.git
 cd dpkit
 npm install          # installs dev deps; the vendored engine is a set of file: deps under vendor/spyglass/
 ```

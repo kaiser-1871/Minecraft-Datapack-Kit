@@ -2,13 +2,13 @@
 
 **[English](README.md) | 简体中文**
 
-[![CI](https://github.com/kaiser-1871/MC-DPKIT/actions/workflows/ci.yml/badge.svg)](https://github.com/kaiser-1871/MC-DPKIT/actions/workflows/ci.yml)
+[![CI](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/actions/workflows/ci.yml/badge.svg)](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/dpkit-mc)](https://www.npmjs.com/package/dpkit-mc)
 
 > **⚠️ 测试状态**：作者本人仅在自己的 **Minecraft 26.2** 版本数据包上实际测试过 dpkit。
 > 其他版本（1.14 ~ 最新）依赖上游引擎的逐版本数据，未经作者逐一实测——
 > **欢迎大家在不同版本上测试并反馈问题！** 有问题请到
-> [Issues](https://github.com/kaiser-1871/MC-DPKIT/issues) 提交。
+> [Issues](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/issues) 提交。
 
 **dpkit**（全称 **Minecraft Datapack Kit**，Minecraft 数据包工具包）可以检查**任意** Minecraft
 数据包，覆盖上游数据提供方支持的所有游戏版本
@@ -507,7 +507,7 @@ node dpkit.mjs --version="latest snapshot"   # 始终跟随最新快照
 - [CONTRIBUTING.md](CONTRIBUTING.md) — 开发环境、构建/测试命令、提交规范与 Spyglass 内置流程。
 - [SECURITY.md](SECURITY.md) — 如何报告安全问题（先私密报告）。
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1。
-- 反馈与问题：欢迎到 [Issues](https://github.com/kaiser-1871/MC-DPKIT/issues) 提交！
+- 反馈与问题：欢迎到 [Issues](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/issues) 提交！
 
 ## 许可证
 

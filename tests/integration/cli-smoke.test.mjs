@@ -131,11 +131,20 @@ test('--versions exits 0 and shows the latest release line', () => {
   assert.match(r.stdout, /latest release: /);
 });
 
-test('an unrecognized --version warns before falling back', () => {
+test('--versions=dpv:94 filters the full list', () => {
   const { env } = freshHome();
-  const r = runCli(['--datapack=' + FIXTURE, '--version=not-a-version', '--no-log'], { env });
-  assert.equal(r.status, 1); // fixture carries known errors, not a regression
-  assert.match(r.stderr, /not recognized/);
+  const r = runCli(['--versions=dpv:94'], { env });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /search results for "dpv:94"/);
+  assert.match(r.stdout, /1\.21\.11/);
+  assert.match(r.stdout, /dpv 94/);
+});
+
+test('an unrecognized --version fails through the cache-miss policy (exit 2)', () => {
+  const { env } = freshHome();
+  const r = runCli(['--datapack=' + FIXTURE, '--version=not-a-version', '--cache-miss=fail', '--no-log'], { env });
+  assert.equal(r.status, 2); // stable environment/network-style code, no misleading report
+  assert.match(r.stderr, /not in the cached version list/);
 });
 
 test('a broken pack.mcmeta is reported and exits 1', () => {
@@ -146,6 +155,16 @@ test('a broken pack.mcmeta is reported and exits 1', () => {
   const r = runCli(['--datapack=' + pack, '--version=26.2', '--no-log'], { env });
   assert.equal(r.status, 1);
   assert.match(r.stdout, /pack\.mcmeta is not valid JSON/);
+});
+
+test('a data-less datapack with valid pack.mcmeta exits 0', () => {
+  const { home, env } = freshHome();
+  const pack = join(home, 'empty-pack');
+  mkdirSync(pack, { recursive: true });
+  writeFileSync(join(pack, 'pack.mcmeta'), JSON.stringify({ pack: { pack_format: 107, description: 'empty' } }));
+  const r = runCli(['--datapack=' + pack, '--version=26.2', '--no-log', '--no-gotchas'], { env });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /1 checked/);
 });
 
 test('a missing --datapack path exits 4 with a clear message', () => {

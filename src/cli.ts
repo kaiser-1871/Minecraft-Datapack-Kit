@@ -11,17 +11,23 @@ import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ROOT_DIR, BASELINE_FILE } from './paths.js';
 import { detectDefaultDatapack } from './datapack-discovery.js';
+import { overlayDirsOf } from './pack-mcmeta.js';
+import { isZipPath } from './zip-datapack.js';
 import { DEFAULT_VERSION, loadConfig } from './config.js';
 import type { DpkitConfig } from './config.js';
 import { BUILTIN_IGNORE_DESC } from './ignore.js';
 import { cachedCommandVersions, CommandDataNotCachedError, loadCachedVersions } from './syntax.js';
-import { downloadToCache, ensureVersionData, VERSIONS_LIST_URL } from './version-data.js';
+import { downloadToCache, ENGINE_DATA_KINDS, ensureVersionData, VERSIONS_LIST_URL } from './version-data.js';
 import * as api from './api.js';
 
 // ---- parse CLI args (util.parseArgs: --name=value or --name value, --no-*, repeatable --ignore) ----
 const { values: V } = (() => {
   try {
+    // `--versions` doubles as a boolean listing flag and a search flag (--versions=1.21).
+    // parseArgs treats a bare string option as a missing value, so normalize the bare form.
+    const ARGV = process.argv.slice(2).map(a => a === '--versions' ? '--versions=' : a);
     return parseArgs({
+      args: ARGV,
       options: {
         version: { type: 'string' },
         datapack: { type: 'string' },
@@ -47,12 +53,19 @@ const { values: V } = (() => {
         strict: { type: 'boolean' },
         'no-log': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
-        versions: { type: 'boolean' },
+        versions: { type: 'string' },
         'check-updates': { type: 'boolean' },
         'cache-versions': { type: 'string' },
         uncached: { type: 'boolean' },
         'dump-all': { type: 'boolean' },
         watch: { type: 'boolean' },
+        workspace: { type: 'string', multiple: true },
+        'additional-datapacks': { type: 'string', multiple: true },
+        'resource-pack': { type: 'string', multiple: true },
+        'resource-packs': { type: 'string', multiple: true },
+        'cache-miss': { type: 'string' },
+        'no-false-positives': { type: 'boolean' },
+        'check-workspace': { type: 'boolean' },
       },
       strict: true,
     });
@@ -97,7 +110,7 @@ let DATAPACK: string | null = V.datapack ?? cfgDatapack ?? detectDefaultDatapack
 const datapackNeeded = !(
   V.help === true ||
   V.syntax !== undefined || V.dump !== undefined || V['dump-all'] === true ||
-  V.registry !== undefined || V.versions === true || V['check-updates'] === true ||
+  V.registry !== undefined || V.versions !== undefined || V['check-updates'] === true ||
   V['complete-inline'] !== undefined || V['cache-versions'] !== undefined
 );
 const samePath = (a: string, b: string): boolean => a.toLowerCase().replace(/\\/g, '/') === b.toLowerCase().replace(/\\/g, '/');
@@ -131,6 +144,16 @@ const NO_MACRO = V['no-macro'] === true;
 const NO_ENTITY_NBT = V['no-entity-nbt'] === true;
 const LOGCHECK = V['no-log'] !== true && cfg.logcheck !== false;
 const WATCH = V.watch === true;
+const WORKSPACE = V.workspace ?? [];
+const ADDITIONAL_DATAPACKS = V['additional-datapacks'] ?? [];
+const RESOURCE_PACKS = [...(V['resource-pack'] ?? []), ...(V['resource-packs'] ?? [])];
+const CACHE_MISS = V['cache-miss'] ?? cfg.cacheMiss ?? 'download';
+if (!['download', 'fallback', 'fail'].includes(CACHE_MISS)) {
+  console.error(`[check] --cache-miss must be one of: download, fallback, fail (got ${CACHE_MISS})`);
+  process.exit(4);
+}
+const NO_FALSE_POSITIVES = V['no-false-positives'] === true;
+const CHECK_WORKSPACE = V['check-workspace'] === true || cfg.checkWorkspace === true;
 
 // ---- "teach AI to write" modes ----
 const SYNTAX = V.syntax ?? '';                  // offline: render grammar of a command path
@@ -139,9 +162,10 @@ const DUMP_ALL = V['dump-all'] === true;
 const COMPLETE = V.complete ?? '';              // live: 'data-relative-path:line:column' completion query at a cursor
 const COMPLETE_INLINE = V['complete-inline'];   // live: complete a raw command string (no file)
 const COMPLETE_INLINE_GIVEN = V['complete-inline'] !== undefined;
-const VERSIONS = V.versions === true;
+const VERSIONS = V.versions !== undefined;
+const VERSIONS_QUERY = V.versions ?? '';
 const CHECK_UPDATES = V['check-updates'] === true; // engine (vendored Spyglass) freshness check
-const CACHE_VERSIONS = V['cache-versions'] ?? '';  // batch warm-up: --cache-versions=1.19.4,1.20.4
+const CACHE_VERSIONS = V['cache-versions'] ?? '';  // batch warm-up of full per-version engine data
 const CACHE_VERSIONS_GIVEN = V['cache-versions'] !== undefined;
 const UNCACHED_ONLY = V.uncached === true;         // --versions --uncached: inverse cached view
 const STRICT = V.strict === true;               // warnings also fail the run (CI-friendly)
@@ -192,16 +216,16 @@ value: CLI flag > env var (DPKIT_DATAPACK, DPKIT_VERSION, DPKIT_CONFIG) > .dpkit
 
 Options:
   --version=<v>    Game version to check as (default auto: reads the checked datapack's pack.mcmeta)
-  --datapack=<p>   Datapack to check (default ${DATAPACK ?? 'auto-detected'})
+  --datapack=<p>   Datapack directory or .zip archive to check (default ${DATAPACK ?? 'auto-detected'})
   --config=<path>  Path to a .dpkit.json config file
   --baseline=<f>   Baseline file for --delta (default ${BASELINE})
-  --files=<glob>   Only these files, relative to data/ (e.g. test/function/*.mcfunction)
+  --files=<glob>   Only these files, relative to data/ (.mcfunction/.json/.nbt; e.g. test/function/*.mcfunction)
   --engine=inproc|lsp|pool   Engine to use (default ${ENGINE}; in-process, LSP subprocess, or pooled)
   --mode=open      Open each file (LSP engine only, default)
   --mode=analyze   Use spyglassmc/analyzeProject (LSP engine only)
   --json           Emit a machine-readable JSON report instead of text
   --delta          Only re-report files whose issues changed since the last --delta run
-  --no-ignore      Do not filter known false positives (${BUILTIN_IGNORE_DESC})
+  --no-ignore      Show raw diagnostics: disable --ignore patterns and built-in filters (incl. ${BUILTIN_IGNORE_DESC})
   --ignore=<p>     Extra ignore pattern: message substring, or /regex/ (repeatable, comma-separated)
   --verbose        Print the server's own log lines
   --no-gotchas     Disable the gotcha linter (heuristic; on by default)
@@ -209,7 +233,14 @@ Options:
   --no-entity-nbt  Disable the entity-NBT schema check (summon/data field names + registry IDs; on by default)
   --strict         Warnings also make the run fail (exit 1) — for CI
   --no-log         Disable the game-log self-check (reload freshness + pack errors; on by default)
-  --watch          Re-check on file changes (incremental: only changed files are re-analyzed; Ctrl-C to stop)
+  --workspace=<p[,p…]>  Other datapacks (dirs or .zip) used ONLY as symbol providers (repeatable)
+  --additional-datapacks=<p[,p…]>  Alias for --workspace (merged; repeatable)
+  --resource-pack=<p[,p…]>  Resource pack (dir or .zip) as read-only sounds/font/lang symbol provider
+  --resource-packs=<p[,p…]> Alias for --resource-pack (repeatable)
+  --cache-miss=download|fallback|fail   Missing per-version cache policy (default download)
+  --no-false-positives   Disable the built-in known-false-positive rule database
+  --check-workspace      Also run a full, separate check for every --workspace datapack
+  --watch          Re-check on file changes (directory datapacks only; incremental: changed files are re-analyzed; Ctrl-C to stop)
 
 Teach-the-AI modes (ground-truth syntax from the ${GAME_VERSION} command tree):
   --syntax=<path>  Print readable grammar of a command path, e.g. 'execute on'
@@ -223,12 +254,12 @@ Teach-the-AI modes (ground-truth syntax from the ${GAME_VERSION} command tree):
                    e.g. --complete=test/function/x.mcfunction:1:24  (1-based)
   --complete-inline="<text>"      Complete a raw command string (no file needed; still needs a
                    datapack for project context), e.g. --complete-inline="effect give @s knock"
-  --versions       List available game versions (server + local cache), show whether a
-                   newer release exists and which have data cached
+  --versions[=<q>]  List versions; add =1.21 / =1.21.11 / =dpv:94 to search the full list
+                   (also shows newer releases and which versions have data cached)
   --check-updates  Check whether Spyglass's GitHub main has moved since the engine was
                    vendored (build it in with: npm run vendor -- --spyglass=<path>)
-  --cache-versions=<a,b,…>  Pre-download commands + registries for the listed versions
-                   (batch warm-up, e.g. --cache-versions=1.19.4,1.20.4)
+  --cache-versions=<a,b,…>  Pre-download full engine data for the listed versions
+                   (commands, registries, block states, vanilla data/resource archives)
   --uncached       With --versions: list only versions whose command data is not cached
 
 Exit codes: 0 = no errors, 1 = errors / internal failures (or warnings, with --strict),
@@ -252,8 +283,8 @@ function warnUnrecognizedVersion(): void {
   const entries = cached as Array<{ type?: string; id?: string }>;
   const known = new Set(entries.map(e => e.id).filter((x): x is string => typeof x === 'string'));
   if (known.has(GAME_VERSION)) return;
-  const fallback = entries.find(e => e.type === 'snapshot')?.id ?? entries[0]?.id ?? 'unknown';
-  console.error(`⚠ [check] version '${GAME_VERSION}' not recognized — falling back to latest snapshot (${fallback}); see --versions`);
+  const nearest = entries.find(e => e.type === 'release')?.id ?? entries[0]?.id ?? 'unknown';
+  console.error(`⚠ [check] version '${GAME_VERSION}' is not in the cached version list (nearest cached release: ${nearest}); see --versions`);
 }
 
 export async function main(): Promise<void> {
@@ -354,20 +385,27 @@ async function runOffline(): Promise<void> {
 
 async function printVersions(): Promise<void> {
   if (UNCACHED_ONLY) { await printUncachedVersions(); return; }
-  const v = await api.listVersions(GAME_VERSION);
+  const v = await api.listVersions(GAME_VERSION, VERSIONS_QUERY);
   if (JSON_OUT) {
     console.log(JSON.stringify({
-      versions: { source: v.source, count: v.count, configured: v.configured },
+      versions: { source: v.source, count: v.count, configured: v.configured, query: v.query },
       latestRelease: v.latestRelease ? { id: v.latestRelease.id, data_pack_version: v.latestRelease.data_pack_version, hasData: v.latestRelease.hasData } : null,
       latestSnapshot: v.latestSnapshot ? { id: v.latestSnapshot.id, data_pack_version: v.latestSnapshot.data_pack_version } : null,
       newerThanConfigured: v.newerThanConfigured,
       recent: v.recent,
+      matches: v.matches,
     }, null, 2));
     return;
   }
   out(`Available versions (from ${v.source}, ${v.count} total):`);
   out(`  latest release: ${v.latestRelease?.id}  (data_pack_version ${v.latestRelease?.data_pack_version})${v.latestRelease?.hasData ? '  ✓ data cached' : '  data not cached, first use downloads'}`);
   out(`  latest snapshot: ${v.latestSnapshot?.id}  (data_pack_version ${v.latestSnapshot?.data_pack_version})`);
+  const list = loadCachedVersions();
+  if (Array.isArray(list)) {
+    const releases = (list as Array<{ type?: string; id?: string }>).filter(e => e.type === 'release');
+    const oldest = releases[releases.length - 1]?.id;
+    if (oldest) out(`  checkable release range: ${oldest} … ${v.latestRelease?.id ?? 'latest'}; older versions (1.13 and below) are rejected — the upstream data does not exist.`);
+  }
   if (!v.isPinned) {
     out(`  ⚠ version not pinned (${v.configured}): checks auto-detect each pack's own pack.mcmeta; pin with --version=<concrete-version> or edit the config.`);
   }
@@ -378,9 +416,20 @@ async function printVersions(): Promise<void> {
   } else if (v.isPinned) {
     out(`\n  ✓ your configured version ${v.configured} is the latest release.`);
   }
-  out(`\n  recent versions (first ${v.recent.length}, ✓ = command data cached):`);
-  for (const r of v.recent) out(`    ${String(r.id).padEnd(18)} ${String(r.type).padEnd(8)} dpv ${String(r.dpv).padEnd(4)} ${r.hasData ? '✓' : '—'}`);
-  if (v.count > v.recent.length) out(`    …(${v.count} total, showing the latest ${v.recent.length})`);
+  if (v.query) {
+    out(`\n  search results for ${JSON.stringify(v.query)} (${v.matches.length} match${v.matches.length === 1 ? '' : 'es'}, full list):`);
+    for (const r of v.matches) out(`    ${String(r.id).padEnd(18)} ${String(r.type).padEnd(8)} dpv ${String(r.dpv).padEnd(4)} ${r.hasData ? '✓' : '—'}`);
+    if (v.matches.length === 0) out(`    (no matches — try an id prefix like 1.21, a full id like 1.21.11, or dpv:94)`);
+  } else {
+    out(`\n  recent versions (first ${v.recent.length}, ✓ = command data cached):`);
+    for (const r of v.recent) out(`    ${String(r.id).padEnd(18)} ${String(r.type).padEnd(8)} dpv ${String(r.dpv).padEnd(4)} ${r.hasData ? '✓' : '—'}`);
+    if (v.count > v.recent.length) {
+      out(`    …(${v.count} total — search instead of scrolling:`);
+      out(`       node dpkit.mjs --versions=1.21        # every version whose id starts with 1.21`);
+      out(`       node dpkit.mjs --versions=1.21.11     # one specific version`);
+      out(`       node dpkit.mjs --versions=dpv:94      # every version with data_pack_version 94)`);
+    }
+  }
   out(`\n  tip: new commands/subcommands/registry values/NBT fields are all data-driven; run --version=<new> online once to download them automatically.`);
   out(`       only a brand-new parameter type or a major command-format change requires re-vendoring the engine: npm run vendor -- --spyglass=<updated-checkout>, then npm install.`);
 }
@@ -397,24 +446,46 @@ async function printUncachedVersions(): Promise<void> {
   }
   const have = cachedCommandVersions();
   const entries = cached as Array<{ id?: string; type?: string; data_pack_version?: number }>;
-  const uncached = entries.filter(v => v.id && !have.has(v.id));
-  out(`uncached versions (${uncached.length} of ${entries.length} total — command data not downloaded):`);
+  const q = VERSIONS_QUERY.trim();
+  const dpvQ = q.startsWith('dpv:') ? Number(q.slice(4)) : null;
+  const matchesQuery = (v: typeof entries[number]): boolean => {
+    if (!q) return true;
+    if (!v.id) return false;
+    if (dpvQ !== null && Number.isFinite(dpvQ)) return v.data_pack_version === dpvQ;
+    return v.id === q || v.id.startsWith(q) || v.id.toLowerCase().includes(q.toLowerCase());
+  };
+  const uncached = entries.filter(v => v.id && !have.has(v.id) && matchesQuery(v));
+  out(`uncached versions (${uncached.length} of ${entries.length} total — command data not downloaded${q ? `, matching ${JSON.stringify(q)}` : ''}):`);
   for (const v of uncached.slice(0, 100)) out(`  ${String(v.id).padEnd(20)} ${String(v.type ?? '').padEnd(8)} dpv ${String(v.data_pack_version ?? '').padEnd(4)} —`);
   if (uncached.length > 100) out(`  …(${uncached.length} total uncached, showing the first 100)`);
   out(`\n  tip: pre-download a set once: node dpkit.mjs --cache-versions=1.19,1.20.4`);
 }
 
-/** --cache-versions=a,b,…: batch pre-download of per-version commands + registries. */
+/** --cache-versions=a,b,…: batch pre-download of full per-version engine data. */
 async function runCacheVersions(): Promise<void> {
   const list = CACHE_VERSIONS.split(',').map(s => s.trim()).filter(Boolean);
   if (!list.length) {
     throw new api.DpkitError('[check] --cache-versions needs a comma-separated version list, e.g. --cache-versions=1.19.4,1.20.4', api.EXIT_USAGE);
   }
   let ok = 0, failed = 0;
+  // Reject unknown ids from the local version list BEFORE hitting five slow per-version URLs
+  // (a bogus id otherwise costs 5 × 30s of timeouts). When the list isn't cached, refresh it.
+  let knownIds: Set<string> | null = null;
+  {
+    let listData = loadCachedVersions();
+    if (!Array.isArray(listData)) {
+      const r = await downloadToCache(VERSIONS_LIST_URL);
+      if (r.ok) listData = loadCachedVersions();
+    }
+    if (Array.isArray(listData)) knownIds = new Set((listData as Array<{ id?: string }>).map(e => e.id).filter((x): x is string => typeof x === 'string'));
+  }
   for (const v of list) {
     try {
-      const concrete = await ensureVersionData(v, ['commands', 'registries']);
-      out(`✓ ${concrete}  (commands + registries cached)`);
+      if (knownIds && !knownIds.has(v)) {
+        throw new CommandDataNotCachedError(`No command data cached for version ${v} — it is not in the available version list; run --versions to list supported versions.`);
+      }
+      const concrete = await ensureVersionData(v, ENGINE_DATA_KINDS);
+      out(`✓ ${concrete}  (full engine data cached)`);
       ok++;
     } catch (err) {
       if (err instanceof CommandDataNotCachedError) {
@@ -458,7 +529,9 @@ async function runCheckUpdates(): Promise<void> {
 
 // ---------- check ----------
 async function runCheck(): Promise<void> {
-  const result = await api.checkDatapack({
+  const workspaceList = [...(cfg.workspace ?? []), ...WORKSPACE, ...(cfg.additionalDatapacks ?? []), ...ADDITIONAL_DATAPACKS];
+  const resourceList = [...(cfg.resourcePacks ?? []), ...RESOURCE_PACKS];
+  const mainOptions = {
     datapack: requireDatapack(),
     version: GAME_VERSION,
     only: ONLY,
@@ -474,23 +547,59 @@ async function runCheck(): Promise<void> {
     verbose: VERBOSE,
     datapackSource: DP_SOURCE,
     minecraftRoot: cfg.minecraftRoot,
+    workspace: workspaceList,
+    resourcePacks: resourceList,
+    cacheMiss: CACHE_MISS as api.CacheMissPolicy,
+    falsePositives: NO_FALSE_POSITIVES ? false : cfg.falsePositives,
     onLog: out,
-  });
-  const { report } = result;
-  versionHint(report.resolvedVersion);
+  } satisfies Parameters<typeof api.checkDatapack>[0];
+  const result = await api.checkDatapack(mainOptions);
+  const workspaceResults: api.CheckResult[] = [];
+  if (CHECK_WORKSPACE) {
+    for (const pack of workspaceList) {
+      const r = await api.checkDatapack({
+        ...mainOptions,
+        datapack: pack,
+        workspace: [],
+        additionalDatapacks: [],
+        delta: false,
+        datapackSource: 'cli',
+      });
+      workspaceResults.push(r);
+    }
+  }
 
+  for (const r of [result, ...workspaceResults]) versionHint(r.report.resolvedVersion);
   if (JSON_OUT) {
-    console.log(JSON.stringify(report, null, 2));
+    if (workspaceResults.length) {
+      console.log(JSON.stringify({ report: result.report, workspaceReports: workspaceResults.map(r => r.report) }, null, 2));
+    } else {
+      console.log(JSON.stringify(result.report, null, 2));
+    }
   } else {
     renderText(result);
+    for (const r of workspaceResults) {
+      console.log(`\n———— WORKSPACE PACK SEPARATE CHECK: ${r.report.datapack} ————`);
+      renderText(r);
+    }
   }
-  const failed = report.summary.errors > 0 || report.summary.internalFailures > 0 || (STRICT && report.summary.warnings > 0);
-  // A green report for a version whose command data never made it into the cache is
-  // untrustworthy — the engine can parse nothing and stay silently "clean". Fail loudly.
-  const dataCached = !report.resolvedVersion || cachedCommandVersions().has(report.resolvedVersion);
+
+  const failedOf = (r: api.CheckResult): boolean =>
+    r.report.summary.errors > 0 || r.report.summary.internalFailures > 0 || (STRICT && r.report.summary.warnings > 0);
+  const cacheOk = (r: api.CheckResult): boolean =>
+    !r.report.coverage.engineUsed || !r.report.resolvedVersion || cachedCommandVersions().has(r.report.resolvedVersion);
+  let failed = failedOf(result);
+  let dataCached = cacheOk(result);
+  for (const r of workspaceResults) {
+    failed = failed || failedOf(r);
+    dataCached = dataCached && cacheOk(r);
+    if (!cacheOk(r) && JSON_OUT) {
+      console.error(`⚠ [check] command data for ${r.report.resolvedVersion} is not cached locally — this check may be incomplete (the engine could not fetch it). Run node dpkit.mjs --version=${r.report.resolvedVersion} online once to download it, then re-check.`);
+    }
+  }
   process.exitCode = failed ? 1 : (dataCached ? 0 : 2);
   if (!dataCached && JSON_OUT) {
-    console.error(`⚠ [check] command data for ${report.resolvedVersion} is not cached locally — this check may be incomplete (the engine could not fetch it). Run node dpkit.mjs --version=${report.resolvedVersion} online once to download it, then re-check.`);
+    console.error(`⚠ [check] command data for the check is not cached locally — the report above may be incomplete. Run node dpkit.mjs --versions online once to download it, then re-check.`);
   }
 }
 
@@ -501,6 +610,9 @@ async function runCheck(): Promise<void> {
 async function runWatch(): Promise<void> {
   if (JSON_OUT) throw new api.DpkitError('[check] --watch does not support --json (interactive text output only)', api.EXIT_USAGE);
   const datapack = requireDatapack();
+  if (isZipPath(datapack)) {
+    throw new api.DpkitError('[check] --watch does not support .zip datapacks yet — extract the zip or watch the extracted folder.', api.EXIT_USAGE);
+  }
   let pooledEngine = api.createInProcEnginePool();
   const MCMETA = join(datapack, 'pack.mcmeta');
   /** The file set + mtimes as of the last check (drives incremental updates). */
@@ -514,7 +626,7 @@ async function runWatch(): Promise<void> {
   /** Absolute path → mtimeMs for every checkable file + pack.mcmeta. */
   const snapshotFiles = (): Map<string, number> => {
     const m = new Map<string, number>();
-    for (const f of api.collectFiles(datapack, ONLY).files) {
+    for (const f of api.collectFiles(datapack, ONLY, overlayDirsOf(datapack)).files) {
       try { m.set(f, statSync(f).mtimeMs); } catch { m.set(f, -1); }
     }
     try { m.set(MCMETA, statSync(MCMETA).mtimeMs); } catch { /* no pack.mcmeta */ }
@@ -536,6 +648,10 @@ async function runWatch(): Promise<void> {
     verbose: VERBOSE,
     datapackSource: DP_SOURCE,
     minecraftRoot: cfg.minecraftRoot,
+    workspace: [...(cfg.workspace ?? []), ...WORKSPACE, ...(cfg.additionalDatapacks ?? []), ...ADDITIONAL_DATAPACKS],
+    resourcePacks: [...(cfg.resourcePacks ?? []), ...RESOURCE_PACKS],
+    cacheMiss: CACHE_MISS as api.CacheMissPolicy,
+    falsePositives: NO_FALSE_POSITIVES ? false : cfg.falsePositives,
     onLog: out,
     ...extra,
   });
@@ -578,7 +694,7 @@ async function runWatch(): Promise<void> {
             if (prev !== undefined && prev !== mtime) changed.push(f);
           }
           if (changed.length && pooledEngine.updateFile) {
-            const { files, rels } = api.collectFiles(datapack, ONLY);
+            const { files, rels } = api.collectFiles(datapack, ONLY, overlayDirsOf(datapack));
             const relOf = new Map<string, string>(files.map((f, i) => [f, rels[i]]));
             for (const f of changed) {
               const rel = relOf.get(f);
@@ -630,9 +746,13 @@ function versionHint(resolvedVersion: string | null): void {
       const effective = resolvedVersion ?? GAME_VERSION;
       const eff = versions.find(v => v.id === effective);
       const pinned = !['auto', 'latest release', 'latest snapshot'].includes(GAME_VERSION);
-      if (latest && eff && pinned && eff.data_pack_version < latest.data_pack_version) {
-        out(`\n[check] tip: the latest release is ${latest.id} (data_pack_version ${latest.data_pack_version}), you're checking as ${effective} (dpv ${eff.data_pack_version}).`);
-        out(`       switch: node dpkit.mjs --version="${latest.id}"  ·  follow: --version="latest release"  ·  list: --versions`);
+      if (latest && eff && eff.data_pack_version < latest.data_pack_version) {
+        out(`\n[check] tip: the latest release is ${latest.id} (data_pack_version ${latest.data_pack_version}), this check used ${effective} (dpv ${eff.data_pack_version}).`);
+        if (pinned) {
+          out(`       switch: node dpkit.mjs --version="${latest.id}"  ·  follow: --version="latest release"  ·  list: --versions`);
+        } else {
+          out(`       auto-detection picked ${effective} from pack.mcmeta — pin --version="${latest.id}" if the pack should target ${latest.id}.`);
+        }
       }
     }
   } catch { /* hint is best-effort */ }
@@ -649,20 +769,54 @@ function renderText(result: api.CheckResult): void {
     : null;
   console.log(`\n———— CHECK REPORT ————`);
   console.log(`datapack : ${report.datapack}${sourceLabel ? `   (${sourceLabel})` : ''}`);
-  console.log(`version  : ${report.version}  (server resolved: ${report.resolvedVersion ?? 'unknown'})`);
+  const vi = report.versionInfo;
+  console.log(`version  : target ${vi.target}${vi.targetVersion && vi.targetVersion !== vi.target ? ` (${vi.targetVersion})` : ''} · actual ${report.resolvedVersion ?? 'unknown'} · cache ${vi.cacheSource}`);
+  if (vi.fallback && vi.uncheckedRange) console.log(`         : ⚠ ${vi.uncheckedRange} — NOT checked with the requested version`);
+  if (!vi.fallback) console.log(`         : unchecked range: none (target version was checked)`);
   console.log(`files    : ${report.files.checked} checked, ${report.files.clean} clean${report.delta ? ` · delta: ${report.delta.changedFiles} changed, ${report.delta.resolvedFiles} resolved` : ''}`);
-  console.log(`summary  : ${report.summary.errors} error(s) · ${report.summary.warnings} warning(s) · ${report.summary.ignored} ignored · ${report.summary.internalFailures} internal-failure · gotchas ${report.summary.gotchas}`);
+  console.log(`summary  : ${report.summary.errors} error(s) · ${report.summary.warnings} warning(s) · ${report.summary.ignored} ignored · ${report.summary.internalFailures} internal-failure · gotchas ${report.summary.gotchas} · symbols-resolved ${report.summary.symbolsResolved} · scope-hints ${report.summary.scopeHints}`);
+  if (report.delta) {
+    console.log(`baseline : ${report.delta.baseline.errors} error / ${report.delta.baseline.warnings} warning`);
+    console.log(`current  : ${report.delta.current.errors} error / ${report.delta.current.warnings} warning`);
+    console.log(`new      : ${report.delta.new.errors} error / ${report.delta.new.warnings} warning`);
+    console.log(`resolved : ${report.delta.resolved.errors} error / ${report.delta.resolved.warnings} warning`);
+  }
   const cov = report.coverage;
   const covParts: string[] = [];
   if (cov.filesSkipped > 0) covParts.push(`skipped (engine failure) ${cov.filesSkipped}`);
-  if (cov.macroLines > 0) covParts.push(`macro lines ${cov.macroLines} · registry-ID checked ${cov.macroChecked} · unchecked ${cov.macroUnchecked}`);
-  if (cov.nbtLines > 0) covParts.push(`entity-NBT ${cov.nbtLines} lines · field positions checked ${cov.nbtChecked} · unchecked ${cov.nbtUnchecked}`);
+  if (cov.macroUnavailable) covParts.push('macro-ID scan skipped (command data not cached)');
+  else if (cov.macroLines > 0) covParts.push(`macro lines ${cov.macroLines} · registry-ID checked ${cov.macroChecked} · literal syntax checked ${cov.macroSyntaxChecked} · unchecked ${cov.macroUnchecked + cov.macroSyntaxUnchecked}`);
+  if (cov.nbtUnavailable) covParts.push('entity-NBT scan skipped (mcdoc schema not cached)');
+  else if (cov.nbtLines > 0) covParts.push(`entity-NBT ${cov.nbtLines} lines · field positions checked ${cov.nbtChecked} · unchecked ${cov.nbtUnchecked}`);
   if (cov.autoFiltered > 0) covParts.push(`auto-filtered ${cov.autoFiltered}`);
+  if (cov.overlayFilesSkipped > 0) covParts.push(`inactive overlay files skipped ${cov.overlayFilesSkipped}`);
+  if (cov.unreadableDirs > 0) covParts.push(`unreadable directories ${cov.unreadableDirs}`);
+  if (cov.unreadableFiles > 0) covParts.push(`unreadable files ${cov.unreadableFiles}`);
+  if (cov.macroLines > 0 || cov.nbtLines > 0) {
+    covParts.push(`checked · not applicable · unresolved — macro (${cov.macroChecked + cov.macroSyntaxChecked} · ${cov.macroNotApplicableFiles} files · ${cov.macroUnchecked + cov.macroSyntaxUnchecked}) and entity-NBT (${cov.nbtChecked} · ${cov.nbtNotApplicableFiles} files · ${cov.nbtUnchecked})`);
+  }
   if (covParts.length) console.log(`coverage : ${covParts.join(' · ')}`);
+  if (cov.macroUncheckedPositions.length) {
+    console.log(`  macro unresolved positions (${cov.macroUncheckedPositions.length}):`);
+    for (const pos of cov.macroUncheckedPositions.slice(0, 50)) console.log(`    ${pos.file}:${pos.line}  ${pos.reason} — ${pos.detail}`);
+    if (cov.macroUncheckedPositions.length > 50) console.log(`    …(${cov.macroUncheckedPositions.length - 50} more; use --json for the full list)`);
+  }
+  if (cov.nbtUncheckedPositions.length) {
+    console.log(`  entity-NBT unresolved positions (${cov.nbtUncheckedPositions.length}):`);
+    for (const pos of cov.nbtUncheckedPositions.slice(0, 50)) console.log(`    ${pos.file}:${pos.line}  ${pos.reason} — ${pos.detail}`);
+    if (cov.nbtUncheckedPositions.length > 50) console.log(`    …(${cov.nbtUncheckedPositions.length - 50} more; use --json for the full list)`);
+  }
   // #3: make "0 warnings" honest — surface how much was NOT validated.
-  const uncheckedTotal = cov.macroUnchecked + cov.nbtUnchecked;
+  if (cov.macroUnavailable || cov.nbtUnavailable) {
+    const skipped = [cov.macroUnavailable ? 'macro registry IDs' : '', cov.nbtUnavailable ? 'entity NBT' : ''].filter(Boolean).join(' + ');
+    console.log(`  ⚠ coverage gap: ${skipped} not validated (required cache data missing) — run online once to download it, then re-check`);
+  }
+  const uncheckedTotal = cov.macroUnchecked + cov.macroSyntaxUnchecked + cov.nbtUnchecked;
   if (uncheckedTotal > 0) {
-    console.log(`  ⚠ coverage gap: ${uncheckedTotal} position(s) not validated (macro ${cov.macroUnchecked} · entity-NBT ${cov.nbtUnchecked}) — “0 warnings” does not mean every position was checked`);
+    console.log(`  ⚠ coverage gap: ${uncheckedTotal} position(s) not validated (macro ${cov.macroUnchecked + cov.macroSyntaxUnchecked} · entity-NBT ${cov.nbtUnchecked}) — “0 warnings” does not mean every position was checked`);
+  }
+  if (cov.unreadableDirs > 0 || cov.unreadableFiles > 0) {
+    console.log(`  ⚠ coverage gap: ${cov.unreadableDirs + cov.unreadableFiles} unreadable path(s) were not checked (see report warnings)`);
   }
   if (report.resolvedVersion && !cachedCommandVersions().has(report.resolvedVersion)) {
     console.log(`\n⚠ command data for ${report.resolvedVersion} is not cached locally — the check above may be incomplete (the engine could not fetch it).`);
@@ -676,6 +830,14 @@ function renderText(result: api.CheckResult): void {
   if (ignoredAgg.length) {
     console.log(`\n== ignored (known false positives, not counted) ==`);
     for (const [m, c] of ignoredAgg) console.log(`  ${c}× ${m}`);
+  }
+  if (report.resolvedSymbols.length) {
+    console.log(`\n== symbols resolved from auxiliary providers (read-only, not validated) ==`);
+    for (const r of report.resolvedSymbols) console.log(`  [${r.file}:${r.line}] ${r.symbol} — ${r.note}`);
+  }
+  if (report.scopeHints.length) {
+    console.log(`\n== scope hints (not errors/warnings; add --workspace= to resolve) ==`);
+    for (const h of report.scopeHints) console.log(`  [${h.file}:${h.line}] ${h.message}`);
   }
   if (report.gotchas.length) {
     console.log(`\n== ${verLabel} known-gotcha scan (heuristic, not counted as errors; --no-gotchas to disable) ==`);

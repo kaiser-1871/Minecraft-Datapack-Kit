@@ -1,5 +1,7 @@
 // entity-nbt.test.mjs — per-version entity NBT schema + summon/data scanner.
 // Uses the real cached vanilla-mcdoc tarball + registries (same data the engine validates against).
+// 26.2 is a fixed regression anchor here; since/until behavior across versions is also exercised
+// below and by tests/multi-version.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadEntitySchemas, scanEntityNbt } from '../../dist/entity-nbt.js';
@@ -62,6 +64,18 @@ test('unknown field / unknown entity are unchecked, never warned', () => {
   assert.equal(r2.issues.length, 0);
   assert.equal(r2.unchecked, 1);
 });
+
+test('custom entity types still validate globally registry-bearing fields', () => {
+  const bad = scan('summon mypack:custom_entity ~ ~ ~ {DeathLootTable:"minecraft:empty",Whatever:1b}\n');
+  assert.equal(bad.issues.length, 1);
+  assert.equal(bad.issues[0].key, 'nbt-registry');
+  assert.equal(bad.checked, 1);
+  assert.equal(bad.unchecked, 1);
+  const good = scan('summon mypack:custom_entity ~ ~ ~ {DeathLootTable:"minecraft:chests/abandoned_mineshaft"}\n');
+  assert.equal(good.issues.length, 0);
+  assert.equal(good.checked, 1);
+});
+
 
 test('a field added in a later version is flagged as future in an older version', () => {
   // equipment was added in 1.21.5 — in 1.21.4 it is not available (and HandItems still is)

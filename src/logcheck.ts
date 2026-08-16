@@ -1,51 +1,79 @@
 // logcheck.ts — game-log self-check (best-effort): reload freshness + datapack load errors.
 // Fully generic: the log path is derived from the datapack's own versions segment / the
 // configured minecraftRoot / %APPDATA%, and error-line filtering matches namespaces under the
-// datapack's own data/ — nothing machine- or pack-specific is hard-coded.
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+// datapack's own data/ — nothing machine- or pack-specific is hard-coded. Log discovery and
+// reading (official / Prism / TLauncher, rotated .log.gz) is delegated to logreader.ts so the
+// CLI self-check and the MCP read_logs tool share one implementation.
+import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { MAX_LOG_LINES, readGameLogs } from './logreader.js';
+import { listDataRoots } from './pack-mcmeta.js';
 import type { GameLogReport } from './types.js';
 
 /** Namespaces the datapack itself defines (data/<ns> dirs), for log-line relevance. */
-function packNamespaces(datapack: string): string[] {
-  try {
-    return readdirSync(join(datapack, 'data'), { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name);
-  } catch { return []; }
-}
-
-function findGameLog(datapack: string, minecraftRoot?: string): string | null {
-  const parts = datapack.split(/[\\/]+/);
-  const cand: string[] = [];
-  const vi = parts.findIndex(p => p === 'versions');
-  if (vi >= 0) {
-    cand.push(join(...parts.slice(0, vi + 2), 'logs', 'latest.log')); // <install>\versions\<ver>\logs
-    cand.push(join(...parts.slice(0, vi), 'logs', 'latest.log'));     // <install>\logs
+function packNamespaces(datapackRoot: string): string[] {
+  const out = new Set<string>();
+  for (const dataDir of listDataRoots(datapackRoot)) {
+    try {
+      for (const e of readdirSync(dataDir, { withFileTypes: true })) {
+        if (e.isDirectory()) out.add(e.name);
+      }
+    } catch { /* no data dir */ }
   }
-  if (minecraftRoot) cand.push(join(minecraftRoot, 'logs', 'latest.log'));
-  cand.push(join(process.env.APPDATA ?? '', '.minecraft', 'logs', 'latest.log'));
-  return cand.find(c => { try { return statSync(c).isFile(); } catch { return false; } }) ?? null;
+  return [...out];
 }
 
-export function gameLogReport(datapack: string, files: string[], minecraftRoot?: string): GameLogReport {
-  const log = findGameLog(datapack, minecraftRoot);
-  if (!log) return { found: false };
+/** <install> directory when the datapack path sits under <install>/versions/<ver>/saves/… */
+function deriveMinecraftRoot(datapack: string): string | null {
+  const parts = datapack.split(/[\/]+/);
+  const vi = parts.findIndex(p => p === 'versions');
+  if (vi > 0) return parts.slice(0, vi).join('/');
+  return null;
+}
+
+export function gameLogReport(
+  datapack: string,
+  files: string[],
+  minecraftRoot?: string,
+  namespacesRoot: string = datapack,
+): GameLogReport {
+  const derived = deriveMinecraftRoot(datapack);
+  let result = derived
+    ? readGameLogs({ launcher: 'default', minecraftRoot: derived, lines: MAX_LOG_LINES, tail: true })
+    : { success: false as const, launcher: 'default', logs: [] };
+  if (!result.success && minecraftRoot) {
+    result = readGameLogs({ launcher: 'default', minecraftRoot, lines: MAX_LOG_LINES, tail: true });
+  }
+  if (!result.success) {
+    // Fall back to auto-detection (Prism → default → TLauncher) only when nothing else worked.
+    const auto = readGameLogs({ lines: MAX_LOG_LINES, tail: true });
+    if (auto.success) result = auto;
+  }
+
+  if (!result.success || result.logs.length === 0) return { found: false };
+
   let text = '';
-  try { text = readFileSync(log, 'utf8'); } catch { return { found: false }; }
-  let packNewest = 0;
-  for (const f of files) { try { const s = statSync(f); if (s.mtimeMs > packNewest) packNewest = s.mtimeMs; } catch { /* ignore */ } }
   let logMtime = 0;
-  try { logMtime = statSync(log).mtimeMs; } catch { /* ignore */ }
+  for (const entry of result.logs) {
+    text += entry.content + '\n';
+    try { logMtime = Math.max(logMtime, statSync(entry.path).mtimeMs); } catch { /* ignore */ }
+  }
+  let packNewest = 0;
+  for (const f of files) {
+    try { packNewest = Math.max(packNewest, statSync(f).mtimeMs); } catch { /* ignore */ }
+  }
   const stale = packNewest > logMtime;
   const lastLoaded = [...text.matchAll(/Loaded (\d+) advancements/g)].pop();
-  const errRe = /(Failed to load|Couldn't parse|Unknown (function|advancement|tag|predicate|item|recipe)|Invalid|Unexpected|Failed to read|Parse error)/i;
+
+  // Include the load-failure summary line and the most common per-file error phrases.
+  const errRe = /(Errors in currently selected datapacks|Failed to load|Couldn't parse|Unknown (function|advancement|tag|predicate|item|recipe)|Invalid|Unexpected|Failed to read|Parse error|prevented loading)/i;
   // Relevance: the pack's own namespaces + generic keywords (only generic words when no namespace)
-  const nss = packNamespaces(datapack).map(n => n.replace(/[|\\^$+?.()[\]{}]/g, '\\$&')).join('|');
+  const nss = packNamespaces(namespacesRoot).map(n => n.replace(/[|\^$+?.()[\]{}]/g, '\$&')).join('|');
   const alternatives = [];
   if (nss) alternatives.push(`(?:${nss}):`);
   alternatives.push('datapack', 'function', 'advancement', 'minecraft:');
   const relevant = new RegExp(`(?:${alternatives.join('|')})`, 'i');
+
   const hits: string[] = [];
   const ls = text.split('\n');
   for (let i = ls.length - 1; i >= 0 && hits.length < 8; i--) {
@@ -55,5 +83,12 @@ export function gameLogReport(datapack: string, files: string[], minecraftRoot?:
     if (!relevant.test(L)) continue;
     hits.push(L.trim().replace(/\s+/g, ' ').slice(0, 200));
   }
-  return { found: true, log, stale, lastLoaded: lastLoaded ? lastLoaded[1] : null, hits: hits.reverse() };
+
+  return {
+    found: true,
+    log: result.logs[0].path,
+    stale,
+    lastLoaded: lastLoaded ? lastLoaded[1] : null,
+    hits: hits.reverse(),
+  };
 }

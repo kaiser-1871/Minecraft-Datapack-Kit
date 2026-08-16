@@ -17,11 +17,24 @@ const key = (datapack: string, version: string): string => `${datapack}@@${versi
 
 interface BaselineStore {
   schema?: number;
+  /** Human-readable format version of the baseline file (new in schema 2; old files load fine). */
+  formatVersion?: number;
   baselines?: Record<string, { files?: Record<string, BaselineEntry> }>;
   // legacy single-entry shape
   datapack?: string;
   version?: string;
   files?: Record<string, BaselineEntry>;
+}
+
+/** Error/warning counts encoded in an issue signature (1 = error, 2 = warning). */
+export function sigCounts(sig: string | undefined | null): { errors: number; warnings: number } {
+  const out = { errors: 0, warnings: 0 };
+  if (!sig) return out;
+  for (const line of sig.split(String.fromCharCode(10))) {
+    if (line.startsWith('1:')) out.errors++;
+    else if (line.startsWith('2:')) out.warnings++;
+  }
+  return out;
 }
 
 /**
@@ -55,9 +68,10 @@ export function saveBaseline(
   baselineFile: string,
   baseline: { datapack: string; version: string; files: Record<string, BaselineEntry> },
 ): void {
-  let store: BaselineStore = { schema: 2 };
+  let store: BaselineStore = { schema: 2, formatVersion: 2 };
   try { store = JSON.parse(readFileSync(baselineFile, 'utf8')) as BaselineStore; } catch { /* start fresh */ }
   store.schema = 2;
+  store.formatVersion = 2;
   store.baselines ??= {};
   store.baselines[key(baseline.datapack, baseline.version)] = { files: baseline.files };
   // migrate: drop legacy top-level fields now that we're in multi-entry form

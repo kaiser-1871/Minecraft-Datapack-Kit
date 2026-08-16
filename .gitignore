@@ -4,3 +4,6 @@ dist/
 .baseline/
 .dpkit.json
 .dpkit-baseline.json
+
+# AgentTeams collaboration state (team.json / inbox / reports) — never commit
+.agent-teams/

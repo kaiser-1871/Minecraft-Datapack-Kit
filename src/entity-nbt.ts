@@ -12,7 +12,7 @@
 // scan summon/data NBT for:
 //   1. fields removed in / not yet available in the target version (HandItems → equipment, …);
 //   2. registry IDs inside #[id(registry=…)]-annotated fields that no longer exist (e.g.
-//      DeathLootTable:"minecraft:empty" in 26.2).
+//      DeathLootTable:"minecraft:empty" in a version where it was removed).
 //
 // Conservative by construction (mirrors macrocheck.ts): an unknown entity type / custom
 // namespace / parse desync / missing schema marks the position unchecked and NEVER warns.
@@ -51,7 +51,18 @@ export interface NbtScanStats {
   unchecked: number;
 }
 
-export interface NbtScanResult extends NbtScanStats { issues: NbtIssue[]; }
+export interface NbtUncheckedPosition {
+  /** 1-based line number. */
+  line: number;
+  reason: string;
+  detail: string;
+}
+
+export interface NbtScanResult extends NbtScanStats {
+  issues: NbtIssue[];
+  /** File-locatable positions the scanner could not judge. */
+  uncheckedPositions: NbtUncheckedPosition[];
+}
 
 export interface EntitySchemaData {
   /** entity type (bare, no minecraft:) → resolved top-level field map (any-version union). */
@@ -447,23 +458,40 @@ function stripQuotes(s: string): string {
   return s;
 }
 
-/** Classify a literal registry-ID value inside NBT: valid | invalid | skip (cannot judge). */
+/**
+ * Classify a literal registry-ID value inside NBT: valid | invalid | skip (cannot judge).
+ * Pack-declared IDs are namespace-qualified (`registry/ns/id`) so a custom `x:foo` declaration
+ * never validates `minecraft:foo`.
+ */
 function classifyNbtRegistryValue(value: string, registry: string, regs: RegistryData, declared: Set<string>): 'valid' | 'invalid' | 'skip' {
   const tok = stripQuotes(value);
   if (tok.startsWith('#')) return 'skip';
   if (tok.includes('$(')) return 'skip';
   if (/^[{\[]/.test(tok)) return 'skip'; // not a scalar id (nested/array) — can't judge
-  let bare = tok;
-  if (tok.startsWith('minecraft:')) bare = tok.slice('minecraft:'.length);
-  else if (tok.includes(':')) return 'skip'; // custom namespace
   const values = regs[registry];
   if (!values) return 'skip';
-  if (declared.has(`${registry}/${bare}`)) return 'valid';
-  return values.includes(bare) ? 'valid' : 'invalid';
+
+  const colon = tok.indexOf(':');
+  if (colon < 0) {
+    return values.includes(tok) ? 'valid' : 'invalid';
+  }
+  const ns = tok.slice(0, colon);
+  const id = tok.slice(colon + 1);
+  if (!ns || !id) return 'skip';
+  if (ns === 'minecraft') {
+    return values.includes(id) || declared.has(`${registry}/minecraft/${id}`) ? 'valid' : 'invalid';
+  }
+  return declared.has(`${registry}/${ns}/${id}`) ? 'valid' : 'skip';
 }
 
-interface LineOutcome { found: boolean; checked: number; unchecked: number; issues: NbtIssue[]; }
-const NONE: LineOutcome = { found: false, checked: 0, unchecked: 0, issues: [] };
+interface UnresolvedEntry { reason: string; detail: string }
+interface LineOutcome { found: boolean; checked: number; unchecked: number; issues: NbtIssue[]; unresolved: UnresolvedEntry[]; }
+const NONE: LineOutcome = { found: false, checked: 0, unchecked: 0, issues: [], unresolved: [] };
+
+function nbtUnresolved(out: LineOutcome, reason: string, detail: string, count: number): void {
+  out.unchecked += count;
+  out.unresolved.push({ reason, detail });
+}
 
 function scanSummon(line: string, start: number, lineNo: number, schema: EntitySchemaData, regs: RegistryData, declared: Set<string>, version: string): LineOutcome {
   let i = start;
@@ -480,14 +508,27 @@ function scanSummon(line: string, start: number, lineNo: number, schema: EntityS
   while (k < line.length && line[k] !== '{') k++;
   if (line[k] !== '{') return NONE;
   const close = braceMatch(line, k);
-  if (close < 0) return { found: true, checked: 0, unchecked: 1, issues: [] };
+  if (close < 0) return { found: true, checked: 0, unchecked: 1, issues: [], unresolved: [{ reason: 'unable to parse NBT', detail: 'unclosed compound' }] };
   const entries = parseNbtTopLevel(line.slice(k + 1, close));
-  if (!entries) return { found: true, checked: 0, unchecked: 1, issues: [] };
-  const out: LineOutcome = { found: true, checked: 0, unchecked: 0, issues: [] };
+  if (!entries) return { found: true, checked: 0, unchecked: 1, issues: [], unresolved: [{ reason: 'unable to parse NBT', detail: 'compound structure could not be split into top-level fields' }] };
+  const out: LineOutcome = { found: true, checked: 0, unchecked: 0, issues: [], unresolved: [] };
   for (const e of entries) {
-    if (!fields) { out.unchecked++; continue; }
+    if (!fields) {
+      // Custom/unknown entity types have no entity-specific schema, but globally registry-bearing
+      // NBT fields (e.g. DeathLootTable) still mean the same thing in every entity compound.
+      const globalReg = schema.registryFields.get(e.name);
+      if (globalReg && e.value !== undefined) {
+        out.checked++;
+        const verdict = classifyNbtRegistryValue(e.value, globalReg, regs, declared);
+        if (verdict === 'invalid') out.issues.push({ line: lineNo, key: 'nbt-registry', msg: `[nbt] ${globalReg} '${stripQuotes(e.value)}' is not in the ${globalReg} registry for ${version} (if custom, declare it in the pack first)` });
+        else if (verdict === 'skip') nbtUnresolved(out, 'unresolved due to macro/unknown field', `'${e.value}' is a tag, custom-namespace id, or the registry data is missing`, 1);
+      } else {
+        nbtUnresolved(out, 'unresolved due to unknown field', `unknown entity type '${bare}' — no schema for its fields`, 1);
+      }
+      continue;
+    }
     const info = fields.get(e.name);
-    if (!info) { out.unchecked++; continue; }
+    if (!info) { nbtUnresolved(out, 'unresolved due to unknown field', `field '${e.name}' is not in the cached entity schema for '${bare}'`, 1); continue; }
     out.checked++;
     const v = fieldVerdict(info, version);
     if (v === 'removed') {
@@ -518,10 +559,10 @@ function scanDataMerge(line: string, start: number, lineNo: number, schema: Enti
   while (k < line.length && /\s/.test(line[k])) k++;
   if (line[k] !== '{') return NONE;
   const close = braceMatch(line, k);
-  if (close < 0) return { found: true, checked: 0, unchecked: 1, issues: [] };
+  if (close < 0) return { found: true, checked: 0, unchecked: 1, issues: [], unresolved: [{ reason: 'unable to parse NBT', detail: 'unclosed compound' }] };
   const entries = parseNbtTopLevel(line.slice(k + 1, close));
-  if (!entries) return { found: true, checked: 0, unchecked: 1, issues: [] };
-  const out: LineOutcome = { found: true, checked: 0, unchecked: 0, issues: [] };
+  if (!entries) return { found: true, checked: 0, unchecked: 1, issues: [], unresolved: [{ reason: 'unable to parse NBT', detail: 'compound structure could not be split into top-level fields' }] };
+  const out: LineOutcome = { found: true, checked: 0, unchecked: 0, issues: [], unresolved: [] };
   for (const e of entries) {
     const regName = schema.registryFields.get(e.name);
     if (!regName) { out.unchecked++; continue; }
@@ -547,20 +588,32 @@ export function scanEntityNbt(
   text?: string,
 ): NbtScanResult {
   if (text === undefined) {
-    try { text = readFileSync(filePath, 'utf8'); } catch { return { issues: [], lines: 0, checked: 0, unchecked: 0 }; }
+    try { text = readFileSync(filePath, 'utf8'); } catch { return { issues: [], uncheckedPositions: [], lines: 0, checked: 0, unchecked: 0 }; }
   }
-  const out: NbtScanResult = { issues: [], lines: 0, checked: 0, unchecked: 0 };
+  const out: NbtScanResult = { issues: [], uncheckedPositions: [], lines: 0, checked: 0, unchecked: 0 };
   const lines = text.split('\n');
   for (let idx = 0; idx < lines.length; idx++) {
     const line = stripLineComment(lines[idx]);
     let found = false;
     for (const m of line.matchAll(/\bsummon\b/g)) {
       const r = scanSummon(line, (m.index ?? 0) + 6, idx + 1, schema, regs, declared, version);
-      if (r.found) { found = true; out.checked += r.checked; out.unchecked += r.unchecked; out.issues.push(...r.issues); }
+      if (r.found) {
+        found = true;
+        out.checked += r.checked;
+        out.unchecked += r.unchecked;
+        for (const u of r.unresolved) out.uncheckedPositions.push({ line: idx + 1, reason: u.reason, detail: u.detail });
+        out.issues.push(...r.issues);
+      }
     }
     for (const m of line.matchAll(/\bdata\b/g)) {
       const r = scanDataMerge(line, (m.index ?? 0) + 4, idx + 1, schema, regs, declared, version);
-      if (r.found) { found = true; out.checked += r.checked; out.unchecked += r.unchecked; out.issues.push(...r.issues); }
+      if (r.found) {
+        found = true;
+        out.checked += r.checked;
+        out.unchecked += r.unchecked;
+        for (const u of r.unresolved) out.uncheckedPositions.push({ line: idx + 1, reason: u.reason, detail: u.detail });
+        out.issues.push(...r.issues);
+      }
     }
     if (found) out.lines++;
   }

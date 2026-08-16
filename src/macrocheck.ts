@@ -16,6 +16,7 @@
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { listDataRoots } from './pack-mcmeta.js';
 import type { CommandTree } from './syntax.js';
 import { normalizeRegistryName } from './registry.js';
 import type { RegistryData } from './registry.js';
@@ -34,10 +35,24 @@ export interface MacroStats {
   checked: number;
   /** slots skipped: interpolation / tag / custom namespace / no data / desync / trailing. */
   unchecked: number;
+  /** literal arguments validated with a conservative syntax validator (numeric/range/etc.). */
+  syntaxChecked: number;
+  /** literal arguments that have no conservative validator and remain unchecked. */
+  syntaxUnchecked: number;
+}
+
+export interface MacroUncheckedPosition {
+  /** 1-based line number. */
+  line: number;
+  reason: string;
+  /** Which token/slot could not be judged, when known. */
+  detail: string;
 }
 
 export interface MacroScanResult extends MacroStats {
   issues: MacroIssue[];
+  /** File-locatable positions the scanner had to leave unresolved. */
+  uncheckedPositions: MacroUncheckedPosition[];
 }
 
 /** Argument parsers whose token is a registry ID (validated against the registry). */
@@ -64,31 +79,36 @@ function argWidth(parser?: string): number {
 }
 
 /**
- * Build the set of data-driven registry entries the pack declares: "registry/bareId" for every
- * .json under data/<ns>/<registry>/…/<id>.json (tags/ subtrees excluded — tag refs are never
- * warned anyway). Used to suppress false "not in vanilla registry" warnings on custom entries
- * (damage_type, enchantment, worldgen/biome, …) that the pack itself declares.
+ * Build the set of data-driven registry entries the pack declares:
+ * "registry/namespace/id" for every .json under data/<ns>/<registry>/…/<id>.json
+ * (tags/ subtrees excluded — tag refs are never warned anyway). Namespace-qualified keys prevent
+ * `data/x/advancement/foo.json` from making `minecraft:foo` look valid; only `x:foo` is allowed.
+ * `dataRoots`, when supplied, replaces the default root data/ + all declared overlays (callers
+ * that already filtered overlays by the target version pass their active roots).
  */
-export function buildDeclaredRegistryIds(datapack: string): Set<string> {
+export function buildDeclaredRegistryIds(datapack: string, dataRoots?: string[]): Set<string> {
+  const roots = dataRoots ?? listDataRoots(datapack);
   const out = new Set<string>();
-  const dataDir = join(datapack, 'data');
-  (function walk(dir: string, prefix: string[]): void {
-    let entries;
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      const p = join(dir, e.name);
-      if (e.isDirectory()) walk(p, [...prefix, e.name]);
-      else if (e.name.endsWith('.json')) {
-        // skip data/<ns>/tags/<reg>/… — tag refs are never warned anyway
-        if (prefix[1] === 'tags') continue;
-        // prefix = [ns, ...registry path segments]
-        if (prefix.length >= 2) {
-          const id = e.name.slice(0, -'.json'.length);
-          out.add(`${prefix.slice(1).join('/')}/${id}`);
+  for (const dataDir of roots) {
+    (function walk(dir: string, prefix: string[]): void {
+      let entries;
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p, [...prefix, e.name]);
+        else if (e.name.endsWith('.json')) {
+          // skip data/<ns>/tags/<reg>/… — tag refs are never warned anyway
+          if (prefix[1] === 'tags') continue;
+          // prefix = [ns, ...registry path segments]
+          if (prefix.length >= 2) {
+            const ns = prefix[0];
+            const id = e.name.slice(0, -'.json'.length);
+            out.add(`${prefix.slice(1).join('/')}/${ns}/${id}`);
+          }
         }
       }
-    }
-  })(dataDir, []);
+    })(dataDir, []);
+  }
   return out;
 }
 
@@ -98,30 +118,164 @@ interface SlotResult {
 }
 
 /**
- * Validate one literal token against a registry. 'skip' = cannot judge (tag, custom namespace,
- * registry has no cached data) — never warns, counts as unchecked.
+ * Validate one literal token against a registry. 'skip' = cannot judge (tag, undeclared custom
+ * namespace, registry has no cached data) — never warns, counts as unchecked.
+ *
+ * Declared pack entries are namespace-qualified (`registry/ns/id`): `data/x/…/foo.json` may
+ * satisfy `x:foo`, but never `minecraft:foo` or a bare `foo` (bare IDs mean minecraft).
  */
 function classifyToken(tok: string, regName: string, regs: RegistryData, declared: Set<string>): SlotResult {
   const reg = normalizeRegistryName(regName);
   if (tok.startsWith('#')) return { verdict: 'skip', regName: reg };
-  let bare = tok;
-  if (tok.startsWith('minecraft:')) bare = tok.slice('minecraft:'.length);
-  else if (tok.includes(':')) return { verdict: 'skip', regName: reg }; // custom namespace
   const values = regs[reg];
   if (!values) return { verdict: 'skip', regName: reg };
-  if (declared.has(`${reg}/${bare}`)) return { verdict: 'valid', regName: reg };
-  return values.includes(bare) ? { verdict: 'valid', regName: reg } : { verdict: 'invalid', regName: reg };
+
+  const colon = tok.indexOf(':');
+  if (colon < 0) {
+    return values.includes(tok) ? { verdict: 'valid', regName: reg } : { verdict: 'invalid', regName: reg };
+  }
+  const ns = tok.slice(0, colon);
+  const id = tok.slice(colon + 1);
+  if (!ns || !id) return { verdict: 'skip', regName: reg };
+  if (ns === 'minecraft') {
+    const declaredMinecraft = declared.has(`${reg}/minecraft/${id}`);
+    return values.includes(id) || declaredMinecraft ? { verdict: 'valid', regName: reg } : { verdict: 'invalid', regName: reg };
+  }
+  // Custom namespace: validate when the pack itself declares it, otherwise stay conservative.
+  return declared.has(`${reg}/${ns}/${id}`) ? { verdict: 'valid', regName: reg } : { verdict: 'skip', regName: reg };
 }
 
 interface WalkOutcome {
   checked: number;
   unchecked: number;
+  syntaxChecked: number;
+  syntaxUnchecked: number;
   issues: MacroIssue[];
+  uncheckedReasons: { reason: string; detail: string }[];
+}
+
+function unresolved(out: WalkOutcome, reason: string, detail: string, count: number): void {
+  out.unchecked += count;
+  out.uncheckedReasons.push({ reason, detail });
+}
+
+function unresolvedSyntax(out: WalkOutcome, reason: string, detail: string, count: number): void {
+  out.syntaxUnchecked += count;
+  out.uncheckedReasons.push({ reason, detail });
+}
+
+// ---- conservative literal-argument validation ---------------------------------
+// The engine parses macro lines as opaque text, so a bad literal can hide in any non-registry
+// argument. These validators only fire when the token is clearly invalid for a parser whose
+// syntax is stable (numbers, ranges, booleans, coordinates, small enums). Unknown parsers are
+// counted as syntax-unchecked, never warned.
+
+const INT_RE = /^[+-]?\d+$/;
+const FLOAT_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+const TIME_RE = /^[+-]?\d+[dDsS]?$/;
+const COORD_INT_RE = /^[~^]?[+-]?\d+$/;
+const COORD_FLOAT_RE = /^[~^]?[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+function numInRange(tok: string, props: Record<string, unknown> | undefined, integer: boolean): boolean {
+  if (!(integer ? INT_RE : FLOAT_RE).test(tok)) return false;
+  const n = Number(tok);
+  const min = typeof props?.min === 'number' ? props.min : null;
+  const max = typeof props?.max === 'number' ? props.max : null;
+  if (min !== null && n < min) return false;
+  if (max !== null && n > max) return false;
+  return true;
+}
+
+function rangeOk(tok: string, integer: boolean): boolean {
+  const re = integer ? INT_RE : FLOAT_RE;
+  const dot = tok.indexOf('..');
+  if (dot < 0) return re.test(tok);
+  const left = tok.slice(0, dot);
+  const right = tok.slice(dot + 2);
+  if (left === '' && right === '') return false;
+  if (left !== '' && !re.test(left)) return false;
+  if (right !== '' && !re.test(right)) return false;
+  return true;
+}
+
+function coordOk(tok: string, integer: boolean): boolean {
+  if (tok === '~' || tok === '^') return true;
+  return (integer ? COORD_INT_RE : COORD_FLOAT_RE).test(tok);
+}
+
+function multiTokenOk(tokens: string[], start: number, width: number, integer: boolean): boolean {
+  const end = Math.min(start + width, tokens.length);
+  if (end - start !== width) return false; // truncated by tokenization — desync, not a token error
+  for (let j = start; j < end; j++) if (!coordOk(tokens[j], integer)) return false;
+  return true;
+}
+
+const SIMPLE_PARSERS = new Set([
+  'brigadier:integer', 'brigadier:double', 'brigadier:float', 'brigadier:bool',
+  'minecraft:time', 'minecraft:int_range', 'minecraft:float_range',
+  'minecraft:hex_color', 'minecraft:vec2', 'minecraft:vec3',
+  'minecraft:block_pos', 'minecraft:column_pos', 'minecraft:rotation', 'minecraft:swizzle',
+]);
+
+function rangeSuffix(props: Record<string, unknown> | undefined): string {
+  const min = typeof props?.min === 'number' ? props.min : null;
+  const max = typeof props?.max === 'number' ? props.max : null;
+  if (min === null && max === null) return '';
+  if (min === null) return ` (at most ${max})`;
+  if (max === null) return ` (at least ${min})`;
+  return ` (${min}..${max})`;
+}
+
+function validateSimpleArg(tokens: string[], start: number, width: number, parser: string | undefined, props: Record<string, unknown> | undefined): string | null {
+  const tok = tokens[start];
+  if (!parser || !tok || tok.includes('$(')) return null;
+  switch (parser) {
+    case 'brigadier:integer':
+      if (!numInRange(tok, props, true)) return `'${tok}' is not a valid integer${rangeSuffix(props)}`;
+      return null;
+    case 'brigadier:double':
+    case 'brigadier:float':
+      if (!numInRange(tok, props, false)) return `'${tok}' is not a valid number${rangeSuffix(props)}`;
+      return null;
+    case 'minecraft:time':
+      if (!TIME_RE.test(tok) || !numInRange(tok.replace(/[dDsS]$/, ''), props, true)) return `'${tok}' is not a valid time value${rangeSuffix(props)}`;
+      return null;
+    case 'minecraft:int_range':
+      if (!rangeOk(tok, true)) return `'${tok}' is not a valid integer range (e.g. 5, ..5, 5..10)`;
+      return null;
+    case 'minecraft:float_range':
+      if (!rangeOk(tok, false)) return `'${tok}' is not a valid float range (e.g. 1.5..5)`;
+      return null;
+    case 'brigadier:bool':
+      if (!['true', 'false'].includes(tok)) return `'${tok}' is not a boolean (expected true or false)`;
+      return null;
+    case 'minecraft:hex_color':
+      if (!/^#[0-9a-fA-F]{6}$/.test(tok)) return `'${tok}' is not a #rrggbb color`;
+      return null;
+    case 'minecraft:vec2':
+    case 'minecraft:rotation':
+      if (!multiTokenOk(tokens, start, width, false)) return `'${tokens.slice(start, Math.min(start + width, tokens.length)).join(' ')}' is not a valid ${parser.endsWith('vec2') ? 'vec2' : 'rotation'}`;
+      return null;
+    case 'minecraft:vec3':
+      if (!multiTokenOk(tokens, start, width, false)) return `'${tokens.slice(start, Math.min(start + width, tokens.length)).join(' ')}' is not a valid vec3`;
+      return null;
+    case 'minecraft:block_pos':
+      if (!multiTokenOk(tokens, start, width, true)) return `'${tokens.slice(start, Math.min(start + width, tokens.length)).join(' ')}' is not a valid block position`;
+      return null;
+    case 'minecraft:column_pos':
+      if (!multiTokenOk(tokens, start, width, true)) return `'${tokens.slice(start, Math.min(start + width, tokens.length)).join(' ')}' is not a valid column position`;
+      return null;
+    case 'minecraft:swizzle':
+      if (!/^[xyz]{1,3}$/.test(tok)) return `'${tok}' is not a valid swizzle`;
+      return null;
+    default:
+      return null;
+  }
 }
 
 /** Walk one macro command line's tokens through the command tree (mirrors resolveParentTreeNode). */
 function walkLine(tree: CommandTree, tokens: string[], regs: RegistryData, declared: Set<string>): WalkOutcome {
-  const out: WalkOutcome = { checked: 0, unchecked: 0, issues: [] };
+  const out: WalkOutcome = { checked: 0, unchecked: 0, syntaxChecked: 0, syntaxUnchecked: 0, issues: [], uncheckedReasons: [] };
 
   const step = (node: CommandTree): CommandTree | null => {
     if (node.redirect?.length) {
@@ -152,7 +306,7 @@ function walkLine(tree: CommandTree, tokens: string[], regs: RegistryData, decla
     const interp = tok.includes('$(');
 
     const n = step(node);
-    if (!n) { out.unchecked += tokens.length - i; break; } // redirect unresolvable
+    if (!n) { unresolved(out, 'unable to follow command tree', 'redirect target is not in the cached command tree', tokens.length - i); break; } // redirect unresolvable
     node = n;
 
     // literal child (only a pure-literal token can match)
@@ -166,7 +320,7 @@ function walkLine(tree: CommandTree, tokens: string[], regs: RegistryData, decla
       if (parser !== undefined && RESOURCE_PARSERS.has(parser) && argNode.properties?.registry) {
         // registry slot — width is always 1
         node = argNode;
-        if (interp) { out.unchecked++; i++; continue; }
+        if (interp) { unresolved(out, 'unresolved due to macro', 'registry slot is filled by $(…)', 1); i++; continue; }
         out.checked++;
         const res = classifyToken(tok, argNode.properties.registry as string, regs, declared);
         if (res.verdict === 'invalid') {
@@ -176,7 +330,7 @@ function walkLine(tree: CommandTree, tokens: string[], regs: RegistryData, decla
             msg: `[macro] registry '${tok}' is not in the ${res.regName} registry (if it is custom pack data, declare it first; use --registry=${res.regName} to list valid values for this version)`,
           });
         } else if (res.verdict === 'skip') {
-          out.unchecked++;
+          unresolved(out, 'unresolved due to macro/unknown field', `'${tok}' is a tag, custom-namespace id, or the registry data is missing`, 1);
         }
         i++;
         continue;
@@ -184,8 +338,26 @@ function walkLine(tree: CommandTree, tokens: string[], regs: RegistryData, decla
       const w = argWidth(parser);
       node = argNode;
       if (interp) {
-        if (w === 1) { out.unchecked++; i++; continue; }
-        out.unchecked += tokens.length - i; break; // can't resync a multi-token interpolation
+        if (w === 1) { unresolved(out, 'unresolved due to macro', 'argument slot is filled by $(…)', 1); i++; continue; }
+        unresolved(out, 'unresolved due to macro', 'multi-token argument slot is filled by $(…) and cannot be resynced', tokens.length - i);
+        break; // can't resync a multi-token interpolation
+      }
+      if (i + w > tokens.length) {
+        unresolved(out, 'unable to follow command tree', 'not enough tokens for a multi-token argument slot', tokens.length - i);
+        break;
+      }
+      const simpleError = validateSimpleArg(tokens, i, w, parser, argNode.properties);
+      if (simpleError !== null) {
+        out.syntaxChecked++;
+        out.issues.push({
+          line: 0, // filled by caller
+          key: 'macro-syntax',
+          msg: `[macro] ${simpleError} (macro lines are not parsed by the engine; this literal was validated by dpkit)`,
+        });
+      } else if (parser && SIMPLE_PARSERS.has(parser)) {
+        out.syntaxChecked++;
+      } else {
+        unresolvedSyntax(out, 'macro literal not validated', `parser '${parser ?? 'unknown'}' has no conservative macro validator`, w);
       }
       i = Math.min(i + w, tokens.length);
       continue;
@@ -194,7 +366,7 @@ function walkLine(tree: CommandTree, tokens: string[], regs: RegistryData, decla
     // no matching child, not an argument slot: if the command may end here, trailing tokens
     // are not registry positions (stop cleanly); otherwise we desynced.
     if (node.executable) break;
-    out.unchecked += tokens.length - i;
+    unresolved(out, 'unable to follow command tree', 'tokens do not match the cached grammar (macro/ambiguous)', tokens.length - i);
     break;
   }
 
@@ -215,26 +387,28 @@ export function scanMacroRegistry(
   text?: string,
 ): MacroScanResult {
   if (text === undefined) {
-    try { text = readFileSync(filePath, 'utf8'); } catch { return { issues: [], lines: 0, checked: 0, unchecked: 0 }; }
+    try { text = readFileSync(filePath, 'utf8'); } catch { return { issues: [], uncheckedPositions: [], lines: 0, checked: 0, unchecked: 0, syntaxChecked: 0, syntaxUnchecked: 0 }; }
   }
-  const result: MacroScanResult = { issues: [], lines: 0, checked: 0, unchecked: 0 };
+  const result: MacroScanResult = { issues: [], uncheckedPositions: [], lines: 0, checked: 0, unchecked: 0, syntaxChecked: 0, syntaxUnchecked: 0 };
 
   text.split('\n').forEach((rawLine, idx) => {
     const lineNo = idx + 1;
     const trimmed = rawLine.trimStart();
     if (!trimmed.startsWith('$')) return;
-    if (!trimmed.includes('$(')) return;      // no interpolation → engine already flags it, skip
     if (/^\$\w+\s*=/.test(trimmed)) return;   // $name = value assignment — no command structure
 
     result.lines++;
     const rest = trimmed.slice(1).trimStart();
     const tokens = rest.split(/\s+/).filter(Boolean);
     // whole command is a macro ($(cmd)) — nothing literal to validate
-    if (!tokens.length || tokens[0].startsWith('(')) { result.unchecked++; return; }
+    if (!tokens.length || tokens[0].startsWith('(')) { result.unchecked++; result.uncheckedPositions.push({ line: lineNo, reason: 'unresolved due to macro', detail: 'the whole command is a macro variable' }); return; }
 
     const walked = walkLine(tree, tokens, regs, declared);
     result.checked += walked.checked;
     result.unchecked += walked.unchecked;
+    result.syntaxChecked += walked.syntaxChecked;
+    result.syntaxUnchecked += walked.syntaxUnchecked;
+    for (const pos of walked.uncheckedReasons) result.uncheckedPositions.push({ line: lineNo, reason: pos.reason, detail: pos.detail });
     for (const iss of walked.issues) result.issues.push({ ...iss, line: lineNo });
   });
 

@@ -1,5 +1,7 @@
 // engine.test.mjs — integration test running the real in-process engine against the
-// fixture datapack (tests/fixtures/pack). Requires 26.2 data cached locally (it is).
+// Fixed-version regression fixture (tests/fixtures/pack). These assertions intentionally pin
+// 26.2 so removed-ID behavior stays covered; the cross-version guard lives in
+// tests/multi-version.test.mjs (DPKIT_TEST_VERSIONS).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -18,11 +20,12 @@ test('in-process engine checks the fixture', async () => {
   assert.equal(report.engine, 'inproc');
   assert.equal(report.schemaVersion, 1);
 
-  // ref.mcfunction: calling a nonexistent function → undeclaredSymbol warning
+  // ref.mcfunction: calling a nonexistent function → cross-pack scope hint (not error/warning)
   const ref = report.issues.find(i => i.file === 'test/function/ref.mcfunction');
-  assert.ok(ref, 'expected an issue in ref.mcfunction');
-  assert.equal(ref.severity, 'W');
-  assert.ok(ref.message.includes('no_such_func'));
+  assert.equal(ref, undefined, 'cross-pack function misses are scope hints, not issues');
+  const hint = report.scopeHints.find(i => i.file === 'test/function/ref.mcfunction');
+  assert.ok(hint, 'expected a scope hint in ref.mcfunction');
+  assert.ok(hint.message.includes('no_such_func'));
 
   // gotcha.mcfunction: particle item without map syntax → real parser errors
   assert.ok(report.issues.some(i => i.file === 'test/function/gotcha.mcfunction'));

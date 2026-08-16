@@ -8,7 +8,8 @@ import { checkDatapack, DpkitError } from '../dist/api.js';
 // Default to the self-contained fixture so parity runs on any machine; point
 // DPKIT_PARITY_DATAPACK at your own pack to gate against a bigger surface.
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'pack');
-const version = process.env.DPKIT_PARITY_VERSION ?? '26.2';
+// 'latest release' keeps the gate moving with Minecraft instead of pinning a single version.
+const version = process.env.DPKIT_PARITY_VERSION ?? 'latest release';
 const datapack = process.env.DPKIT_PARITY_DATAPACK ?? FIXTURE;
 
 const started = Date.now();

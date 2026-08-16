@@ -11,7 +11,9 @@ import { cacheDir, cacheIndexSidecarPath, readCachedBytes } from './cache.js';
 import { CommandDataNotCachedError, resolveConcreteVersion } from './syntax.js';
 
 export const VERSIONS_LIST_URL = 'https://api.spyglassmc.com/mcje/versions';
-const FETCH_TIMEOUT_MS = 5000;
+// Old-version command data can take 10s+ to generate server-side; 5s was too tight and made
+// 1.15/1.17/1.18 look unsupported. Keep a generous ceiling but still bounded for offline UX.
+const FETCH_TIMEOUT_MS = 30000;
 
 /** Fetch a URL and store it in Spyglass's cache layout (http/objects + an index.json
  * entry), so both the offline readers and the engine see it on their next read. The
@@ -44,13 +46,33 @@ export async function downloadToCache(url: string): Promise<{ ok: boolean; error
   return { ok: true, error: '' };
 }
 
+/** Kinds of per-version data that ensureVersionData can fetch from api.spyglassmc.com —
+ * the URL suffix after /mcje/versions/{concrete}/. */
+export type VersionDataKind =
+  | 'commands'
+  | 'registries'
+  | 'block_states'
+  | 'vanilla-data/tarball'
+  | 'vanilla-assets-tiny/tarball';
+
+/** Everything the Spyglass engine fetches for a version. Old releases only work when all of
+ * these are cached, because the engine's own fetch timeout is much shorter than the 10s+ the
+ * API can take to generate 1.14/1.15-era data. */
+export const ENGINE_DATA_KINDS: VersionDataKind[] = [
+  'commands',
+  'registries',
+  'block_states',
+  'vanilla-data/tarball',
+  'vanilla-assets-tiny/tarball',
+];
+
 /**
  * Make sure the version's data is cached, downloading it on demand. Returns the concrete
  * version id (resolving 'auto' / 'latest release' / 'latest snapshot'). Throws
  * CommandDataNotCachedError — a clean, recoverable state — when a download fails or the
  * version list cannot be resolved offline.
  */
-export async function ensureVersionData(version: string, kinds: ('commands' | 'registries')[]): Promise<string> {
+export async function ensureVersionData(version: string, kinds: VersionDataKind[]): Promise<string> {
   let concrete = version;
   if (['auto', 'latest release', 'latest snapshot'].includes(version)) {
     if (readCachedBytes(VERSIONS_LIST_URL) == null) {
@@ -68,7 +90,12 @@ export async function ensureVersionData(version: string, kinds: ('commands' | 'r
   for (const k of kinds) {
     const url = `${base}/${k}`;
     if (readCachedBytes(url) != null) continue;
-    const r = await downloadToCache(url);
+    // Some old-version endpoints 502/timeout on first request but succeed on retry.
+    let r = await downloadToCache(url);
+    for (let attempt = 0; !r.ok && attempt < 2 && (/HTTP 5\d\d/.test(r.error) || /timeout|aborted/i.test(r.error)); attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 750 * (attempt + 1)));
+      r = await downloadToCache(url);
+    }
     if (!r.ok) failures.push(`${k} (${r.error})`);
   }
   if (failures.length) {

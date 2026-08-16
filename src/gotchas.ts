@@ -7,6 +7,7 @@
 // Best-effort only: warnings never affect the exit code. Messages prefix the version that was
 // actually checked, never hard-coded.
 import { readFileSync } from 'node:fs';
+import { compareGameVersions } from './version.js';
 import type { GotchaIssue } from './types.js';
 
 const lineOf = (text: string, needle: string, from = 0): number | null => {
@@ -31,6 +32,19 @@ export function scanGotchas(filePath: string, rel: string, version: string, text
     // 2. multiple criteria sharing one trigger + a requirements OR (does not fire in this version)
     try {
       const obj = JSON.parse(text) as unknown;
+      // Vanilla ender_eye keeps its hardcoded throw-on-use behavior even when a data pack gives
+      // it the consumable component; consume_item never fires for it (verified against 26.2's
+      // EnderEyeItem; rule is gated to consumable-capable versions >= 1.21.4).
+      if (compareGameVersions(version, '1.21.4') >= 0 && /^(?:@overlay:[^/]+\/)?minecraft\/item\/ender_eye\.json$/.test(rel)) {
+        const item = obj as { components?: Record<string, unknown> } | null;
+        if (item && typeof item.components === 'object' && item.components !== null && 'minecraft:consumable' in item.components) {
+          out.push({
+            line: lineOf(text, '"minecraft:consumable"') ?? 1,
+            key: 'ender-eye-consumable',
+            msg: `${version}: minecraft:ender_eye has a hardcoded vanilla use action (throw); adding minecraft:consumable does not make it consumable, so the consume_item advancement trigger will not fire. Track the throw with the used_item / use_item trigger instead.`,
+          });
+        }
+      }
       const walk = (v: unknown): void => {
         if (Array.isArray(v)) { v.forEach(walk); return; }
         if (v && typeof v === 'object') {
@@ -59,7 +73,7 @@ export function scanGotchas(filePath: string, rel: string, version: string, text
         if (sk) out.push({ line: n, key: 'nbt-field-casing', msg: `${version}: entity NBT fields are PascalCase (e.g. ${sk[1]} → ${sk[1][0].toUpperCase()}${sk[1].slice(1)}); lowercase/snake_case is silently ignored in summon` });
       }
       // 5. add_multiplied_* direction semantics: the value is a multiplier ×(1+v), not "add v".
-      //    26.2 shape: attribute <target> <attribute> modifier add <id> <value> <operation>
+      //    current command shape: attribute <target> <attribute> modifier add <id> <value> <operation>
       //    (operation literal comes after value; add_value has different semantics so it doesn't
       //    trigger; modifier remove/value get has no operation so it isn't a false positive)
       const am = L.match(/\battribute\s+(\S+)\s+(\S+)\s+modifier\s+add\s+\S+\s+(-?[\d.]+)\s+(add_multiplied_base|add_multiplied_total)\b/);

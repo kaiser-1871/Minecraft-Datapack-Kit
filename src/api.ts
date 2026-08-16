@@ -1,28 +1,39 @@
 // api.ts — the typed public API for dpkit. Both the CLI and the MCP server call these
 // functions; nothing here talks to the terminal or a process — that's the caller's job.
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { BASELINE_FILE } from './paths.js';
 import { DEFAULT_VERSION } from './config.js';
-import { collectFiles, FILES_EMPTY_HINT, toRel } from './collect.js';
+import { collectFiles, FILES_EMPTY_HINT, matchesOnly, toRel } from './collect.js';
+import type { UnreadableDir } from './collect.js';
+import { findDuplicateDataFiles, isRecognizedDataFile, isWrongFolderDiagnostic, parseDataRel, validateDataFilePaths } from './datapack-structure.js';
+import { activeDataRoots, activeOverlayDirs, dataPackVersionOf, resolveVersionForFormatRange, scanPackMcmeta } from './pack-mcmeta.js';
+import { scanStructureNbt } from './structure-nbt.js';
+import { extractZipDatapack, isZipPath } from './zip-datapack.js';
 import { createIgnoreFilter, isVanillaRegistryMiss } from './ignore.js';
 import { loadRegistries, normalizeRegistryName, registryIndex } from './registry.js';
 import { loadVanillaTags } from './vanilla-tags.js';
 import { buildDeclaredRegistryIds, scanMacroRegistry } from './macrocheck.js';
-import type { MacroIssue, MacroStats } from './macrocheck.js';
+import type { MacroIssue, MacroStats, MacroUncheckedPosition } from './macrocheck.js';
 import { loadEntitySchemas, scanEntityNbt } from './entity-nbt.js';
-import type { NbtIssue, NbtScanStats } from './entity-nbt.js';
+import type { NbtIssue, NbtScanStats, NbtUncheckedPosition } from './entity-nbt.js';
 import type { CommandTree } from './syntax.js';
-import { issueSig, loadBaseline, saveBaseline } from './delta.js';
+import { issueSig, loadBaseline, saveBaseline, sigCounts } from './delta.js';
 import { scanGotchas } from './gotchas.js';
 import { gameLogReport } from './logcheck.js';
 import { createLspEngine } from './lsp-legacy.js';
+import { matchKnownFalsePositive, enabledKnownFpRules, SCOPE_HINT_CATEGORIES } from './known-false-positives.js';
+import { prepareAuxPacks, resolveAuxSymbol, scanPackSymbols, splitPathList } from './symbol-providers.js';
+import type { AuxPack, ResolvedAuxSymbol } from './symbol-providers.js';
+import { planConcreteVersion, planVersionCheck } from './cache-policy.js';
+import type { CacheMissPolicy, VersionPlan } from './cache-policy.js';
 import { createInProcEngine, createInProcEnginePool } from './engine/inproc.js';
 import { loadCommandTree, loadCachedVersions, cachedCommandVersions, renderPath, renderAll, resolveConcreteVersion } from './syntax.js';
 import type { BaselineEntry, CheckLog, CompletionItemDTO, GameLogReport, GotchaIssue, RawDiagnostic, ReportIssue, SyntaxResult } from './types.js';
 import type { CheckEngine, EngineCheckResult, EngineSnapshot } from './engine/types.js';
 
 export type { CheckEngine } from './engine/types.js';
+export type { CacheMissPolicy } from './cache-policy.js';
 
 export type EngineKind = 'inproc' | 'lsp' | 'pool';
 
@@ -64,23 +75,73 @@ export interface CheckOptions {
   datapackSource?: 'cli' | 'env' | 'config' | 'auto';
   /** Minecraft install root, for the game-log self-check. */
   minecraftRoot?: string;
+  /** Workspace datapacks (dirs or .zip): read-only symbol providers only. */
+  workspace?: string[];
+  /** Alias for workspace; the two lists are merged in flag order. */
+  additionalDatapacks?: string[];
+  /** Resource packs (dirs or .zip): read-only sounds.json / font / lang symbol providers. */
+  resourcePacks?: string[];
+  /** Behavior when a requested version's command data is missing from the local cache. */
+  cacheMiss?: CacheMissPolicy;
+  /** Known-false-positive rule selection: false disables all, string[] enables a subset. */
+  falsePositives?: boolean | string[];
   onLog?: (msg: string) => void;
 }
 
 /** The JSON-serialized report (matches the legacy --json shape + engine + schemaVersion). */
+export interface VersionCheckInfo {
+  /** Raw requested version (--version/DPKIT_VERSION/config). */
+  target: string;
+  /** Concrete version the target resolves to (null while unresolved). */
+  targetVersion: string | null;
+  /** The version actually handed to the engine. */
+  actual: string | null;
+  cacheSource: 'local cache' | 'downloaded this run' | 'fallback (nearest cached version)' | 'engine resolved' | 'none';
+  fallback: boolean;
+  targetDpv: number | null;
+  actualDpv: number | null;
+  /** What was NOT checked because target != actual, or 'none' when the target was checked. */
+  uncheckedRange: string | null;
+  message: string | null;
+}
+
+export interface ResolvedSymbolReport {
+  file: string;
+  line: number;
+  char: number;
+  symbol: string;
+  source: 'workspace' | 'resource-pack';
+  pack: string;
+  note: string;
+}
+
+export interface ScopeHint {
+  file: string;
+  line: number;
+  char: number;
+  symbol: string;
+  message: string;
+}
+
 export interface CheckReport {
   datapack: string;
   /** Where the datapack path came from ('cli' | 'env' | 'config' | 'auto'), when known. */
   datapackSource?: 'cli' | 'env' | 'config' | 'auto';
   version: string;
   resolvedVersion: string | null;
+  /** Target vs actual check version + cache source (see --cache-miss). */
+  versionInfo: VersionCheckInfo;
   files: { checked: number; clean: number };
-  summary: { errors: number; warnings: number; ignored: number; internalFailures: number; gotchas: number };
+  summary: { errors: number; warnings: number; ignored: number; internalFailures: number; gotchas: number; symbolsResolved: number; scopeHints: number; knownFalsePositives: number };
   issues: ReportIssue[];
   ignored: ReportIssue[];
   gotchas: { file: string; items: GotchaIssue[] }[];
   log: CheckLog;
   byMessage: { message: string; count: number }[];
+  /** Symbols that were missing in the engine but resolved from auxiliary providers. */
+  resolvedSymbols: ResolvedSymbolReport[];
+  /** Cross-pack misses downgraded to scope hints when no workspace was supplied. */
+  scopeHints: ScopeHint[];
   /** What was actually covered vs skipped (macro lines, engine-failed files, auto-filtered). */
   coverage: {
     filesChecked: number;
@@ -88,13 +149,40 @@ export interface CheckReport {
     macroLines: number;
     macroChecked: number;
     macroUnchecked: number;
+    macroSyntaxChecked: number;
+    macroSyntaxUnchecked: number;
+    macroApplicableFiles: number;
+    macroNotApplicableFiles: number;
     /** entity-NBT (summon/data) lines + field positions validated/skipped. */
     nbtLines: number;
     nbtChecked: number;
     nbtUnchecked: number;
+    nbtApplicableFiles: number;
+    nbtNotApplicableFiles: number;
+    /** false when the check had no data files and skipped the engine entirely. */
+    engineUsed: boolean;
+    /** post-scan availability (0 counts + unavailable = the data needed was not cached). */
+    macroUnavailable: boolean;
+    nbtUnavailable: boolean;
     autoFiltered: number;
+    knownFalsePositives: number;
+    /** File-locatable unresolved positions (line + reason + detail). */
+    macroUncheckedPositions: (MacroUncheckedPosition & { file: string })[];
+    nbtUncheckedPositions: (NbtUncheckedPosition & { file: string })[];
+    /** Inactive overlay files omitted because the target version is outside their formats range. */
+    overlayFilesSkipped: number;
+    /** Data directories/files that could not be read (checked? no — surfaced, not silently skipped). */
+    unreadableDirs: number;
+    unreadableFiles: number;
   };
-  delta?: { changedFiles: number; resolvedFiles: number };
+  delta?: {
+    changedFiles: number;
+    resolvedFiles: number;
+    baseline: { errors: number; warnings: number };
+    current: { errors: number; warnings: number };
+    new: { errors: number; warnings: number };
+    resolved: { errors: number; warnings: number };
+  };
   engine: EngineKind;
   schemaVersion: 1;
 }
@@ -113,11 +201,15 @@ export interface VersionListResult {
   source: string;
   count: number;
   configured: string;
+  /** --versions=1.21 / --versions=1.21.11 / --versions=dpv:94 search query. */
+  query: string | null;
   latestRelease: { id: string; data_pack_version?: number; hasData: boolean } | null;
   latestSnapshot: { id: string; data_pack_version?: number } | null;
   newerThanConfigured: { id: string; data_pack_version?: number } | null;
   isPinned: boolean;
   recent: { id: string; type: string; dpv: number | undefined; hasData: boolean }[];
+  /** Filtered results when query was given (the FULL match set, not a "recent 14"). */
+  matches: { id: string; type: string; dpv: number | undefined; hasData: boolean }[];
 }
 
 interface McmetaVersion { id: string; name?: string; type?: string; data_pack_version?: number; resource_pack_version?: number }
@@ -150,20 +242,189 @@ export async function checkDatapack(opts: CheckOptions): Promise<CheckResult> {
       EXIT_USAGE,
     );
   }
-  const { files, rels } = collectFiles(opts.datapack, opts.only ?? '');
-  if (rels.length === 0) {
+
+  // A .zip datapack is extracted once into a temp dir; everything below runs on the extracted
+  // root while the report/delta/log paths keep the user's original path.
+  let workRoot = opts.datapack;
+  let cleanupExtracted: (() => void) | null = null;
+  try {
+    const st = statSync(opts.datapack);
+    if (st.isFile()) {
+      if (!isZipPath(opts.datapack)) {
+        throw new DpkitError(`[check] datapack path is a file but not a .zip archive: ${opts.datapack}\n[check] pass a datapack directory or a .zip datapack.`, EXIT_USAGE);
+      }
+      try {
+        const extracted = await extractZipDatapack(opts.datapack);
+        workRoot = extracted.root;
+        cleanupExtracted = extracted.cleanup;
+      } catch (err) {
+        throw new DpkitError(`[check] could not read datapack zip ${opts.datapack}: ${(err as Error).message}`, EXIT_USAGE);
+      }
+    } else if (!st.isDirectory()) {
+      throw new DpkitError(`[check] datapack path is neither a directory nor a .zip file: ${opts.datapack}`, EXIT_USAGE);
+    }
+  } catch (err) {
+    if (err instanceof DpkitError) throw err;
+    throw new DpkitError(`[check] could not inspect datapack path ${opts.datapack}: ${(err as Error).message}`, EXIT_USAGE);
+  }
+
+  const mcmetaPath = join(workRoot, 'pack.mcmeta');
+  const hasMcmeta = existsSync(mcmetaPath);
+  let mcmetaText: string | null = null;
+  if (hasMcmeta) {
+    try { mcmetaText = readFileSync(mcmetaPath, 'utf8'); }
+    catch { mcmetaText = null; }
+  }
+
+  // Parse pack.mcmeta once to learn overlay dirs. The full diagnostics (which need the
+  // resolved target version) are produced later.
+  const mcmetaScan0 = mcmetaText ? scanPackMcmeta(mcmetaText, workRoot) : null;
+  const declaredOverlays = mcmetaScan0?.overlays ?? [];
+  const allOverlayDirs = declaredOverlays.map(o => o.directory);
+
+  // Resolve the target version BEFORE file collection so overlay directories can be filtered
+  // by their formats range (an overlay for dpv 500..600 is not part of the target-version check).
+  const cachePolicy: CacheMissPolicy = opts.cacheMiss ?? 'download';
+  let versionPlan: VersionPlan | null = null;
+  let autoDetected: string | null = null;
+  try {
+    versionPlan = await planVersionCheck(opts.version, cachePolicy);
+    if (opts.version === 'auto' && mcmetaScan0) {
+      const rangeVersion = resolveVersionForFormatRange(
+        mcmetaScan0.minFormat,
+        mcmetaScan0.maxFormat,
+        mcmetaScan0.hasExplicitRange ? mcmetaScan0.packFormat : null,
+      );
+      if (rangeVersion) {
+        autoDetected = rangeVersion;
+        versionPlan = await planConcreteVersion(rangeVersion, cachePolicy, 'auto');
+      }
+    }
+  } catch (err) {
+    throw new DpkitError((err as Error).message, 2);
+  }
+  const engineVersion = versionPlan?.engineVersion ?? opts.version;
+  const overlayDpv = versionPlan?.actualDpv
+    ?? (autoDetected ? dataPackVersionOf(autoDetected) : null);
+  const activeOverlaySet = new Set(activeOverlayDirs(declaredOverlays, overlayDpv));
+  const activeDataRootList = activeDataRoots(workRoot, declaredOverlays, overlayDpv);
+  const inactiveOverlayCount = allOverlayDirs.length - activeOverlaySet.size;
+
+  // Collect everything, then drop files under overlays that are inactive for the target
+  // version. A null dpv (version still unknown) keeps every overlay, never drops files blindly.
+  const unreadableDirs: UnreadableDir[] = [];
+  const collected = collectFiles(workRoot, opts.only ?? '', allOverlayDirs, entry => unreadableDirs.push(entry));
+  const files: string[] = [];
+  const rels: string[] = [];
+  let skippedOverlayFiles = 0;
+  for (let i = 0; i < collected.files.length; i++) {
+    const { overlay } = parseDataRel(collected.rels[i]);
+    if (overlay !== null && !activeOverlaySet.has(overlay)) { skippedOverlayFiles++; continue; }
+    files.push(collected.files[i]);
+    rels.push(collected.rels[i]);
+  }
+  const activeUnreadableDirs = unreadableDirs.filter(e => {
+    const { overlay } = parseDataRel(e.rel);
+    return overlay === null || activeOverlaySet.has(overlay);
+  });
+
+  // #7: --files checks ONLY the files the user listed. pack.mcmeta is included only when the
+  // user explicitly asked for it (e.g. --files=pack.mcmeta or --files=*.mcmeta).
+  const mcmetaRel = 'pack.mcmeta';
+  const includeMcmeta = !opts.only || matchesOnly(mcmetaRel, opts.only);
+  const explicitMcmetaOnly = opts.only !== undefined && opts.only !== '' && matchesOnly(mcmetaRel, opts.only);
+  if (rels.length === 0 && !hasMcmeta && !explicitMcmetaOnly) {
     throw new DpkitError(
-      `[check] No files matched (datapack=${opts.datapack}, filter=${opts.only || '(all)'})\n${FILES_EMPTY_HINT}`,
+      `[check] No files matched (datapack=${opts.datapack}, filter=${opts.only || '(all)'})
+${FILES_EMPTY_HINT}`,
       EXIT_USAGE,
     );
   }
-  // Include pack.mcmeta so a broken one surfaces — today it silently skews version auto-detect
-  // and produces 0 diagnostics ("this wasn't checked"). Checked DPKIT-side (not via the engine):
-  // the LSP path never publishes diagnostics for root-level files and would hang its settle wait.
-  const mcmetaPath = join(opts.datapack, 'pack.mcmeta');
-  const mcmetaRel = existsSync(mcmetaPath) && !rels.includes('pack.mcmeta') ? 'pack.mcmeta' : null;
-  if (mcmetaRel) { files.push(mcmetaPath); rels.push(mcmetaRel); }
-  opts.onLog?.(`[check] datapack=${opts.datapack}${opts.datapackSource ? `  (${({ cli: 'from --datapack', env: 'from DPKIT_DATAPACK', config: 'from .dpkit.json', auto: 'from auto-detected' })[opts.datapackSource]})` : ''}  version=${opts.version}  files=${files.length}`);
+  if (includeMcmeta) {
+    files.push(mcmetaPath);
+    rels.push(mcmetaRel);
+  }
+
+  // Auxiliary providers (--workspace/--additional-datapacks/--resource-pack/--resource-packs).
+  // They are symbol providers only — never part of the checked file set, never validated.
+  const workspacePaths = splitPathList([...(opts.workspace ?? []), ...(opts.additionalDatapacks ?? [])]);
+  const resourcePaths = splitPathList(opts.resourcePacks ?? []);
+  let auxPacks: AuxPack[] = [];
+  try {
+    auxPacks.push(...await prepareAuxPacks(workspacePaths, 'workspace'));
+    auxPacks.push(...await prepareAuxPacks(resourcePaths, 'resource-pack'));
+  } catch (err) {
+    throw new DpkitError(`[check] ${(err as Error).message}`, EXIT_USAGE);
+  }
+
+  opts.onLog?.(`[check] datapack=${opts.datapack}${opts.datapackSource ? `  (${({ cli: 'from --datapack', env: 'from DPKIT_DATAPACK', config: 'from .dpkit.json', auto: 'from auto-detected' })[opts.datapackSource]})` : ''}  version=${opts.version}  files=${files.length}${workRoot !== opts.datapack ? '  (extracted from .zip)' : ''}${workspacePaths.length ? `  workspace=${workspacePaths.length} pack(s)` : ''}${resourcePaths.length ? `  resource-packs=${resourcePaths.length}` : ''}`);
+  if (versionPlan?.message) opts.onLog?.(`[check] ${versionPlan.message}`);
+  if (autoDetected && opts.version === 'auto' && mcmetaScan0?.hasExplicitRange) {
+    opts.onLog?.(`[check] auto-detected version ${autoDetected} from pack.mcmeta format range ${mcmetaScan0?.formatRangeLabel ?? mcmetaScan0?.maxFormat ?? '?'}`);
+  }
+  if (mcmetaText) {
+    // The explicit format-range hint (e.g. "pack supports dpv 88..unbounded; target 1.21.11
+    // (dpv 94) is inside range.") is printed for the version that will actually be used.
+    let hintVersion: string | null = versionPlan?.actualVersion ?? autoDetected ?? null;
+    if (!hintVersion && engineVersion !== 'auto') hintVersion = engineVersion;
+    if (hintVersion && ['auto', 'latest release', 'latest snapshot'].includes(hintVersion)) {
+      try { hintVersion = resolveConcreteVersion(hintVersion); } catch { hintVersion = null; }
+    }
+    if (hintVersion) {
+      const hint = scanPackMcmeta(mcmetaText, workRoot, { version: hintVersion, dataPackVersion: dataPackVersionOf(hintVersion) }).formatHint;
+      if (hint) opts.onLog?.(`[check] ${hint}`);
+    }
+  }
+
+  if (skippedOverlayFiles > 0) {
+    const label = versionPlan?.actualVersion ?? autoDetected ?? opts.version;
+    opts.onLog?.(`[check] skipped ${skippedOverlayFiles} file(s) from ${inactiveOverlayCount} overlay(s) that are inactive for ${label} (dpv ${overlayDpv ?? '?'})`);
+  }
+
+  // dpkit-side structural diagnostics: illegal resource-location paths + case collisions.
+  const dataRels = rels.filter(r => r !== mcmetaRel);
+  const structuralDiags = mergeDiagnostics(
+    validateDataFilePaths(dataRels),
+    findDuplicateDataFiles(dataRels),
+  );
+  const unreadableDiags = new Map<string, RawDiagnostic[]>();
+  for (const e of activeUnreadableDirs) {
+    const rel = e.rel || 'data/';
+    unreadableDiags.set(rel, [{
+      severity: 2,
+      message: `[check] unreadable data directory "${rel}" (${e.path}) — its files were not checked: ${e.error}`,
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+    }]);
+  }
+
+  // Files the engine has no resource definition for are ignored by Minecraft too. They get a
+  // dpkit warning and are NOT sent to the engine (the LSP path would otherwise wait 150s for
+  // diagnostics that never come).
+  const recognizedIdx: number[] = [];
+  const unrecognizedDiags = new Map<string, RawDiagnostic[]>();
+  for (let i = 0; i < files.length; i++) {
+    if (rels[i] === mcmetaRel) continue;
+    if (isRecognizedDataFile(rels[i])) recognizedIdx.push(i);
+    else {
+      unrecognizedDiags.set(rels[i], [{
+        severity: 2,
+        message: `[check] unrecognized data file path "${rels[i]}" — this path is not a data-pack resource folder, so Minecraft and the engine ignore it`,
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      }]);
+    }
+  }
+  const engineFiles = recognizedIdx.map(i => files[i]);
+  const engineRels = recognizedIdx.map(i => rels[i]);
+  // Readability preflight for text files: the engine/post-scans skip unreadable files in several
+  // places; turn that into an explicit warning instead of a silently incomplete check.
+  const unreadableFileDiags = unreadableTextFileDiagnostics(engineFiles, engineRels);
+  mergeDiagnosticsInto(unreadableDiags, unreadableFileDiags);
+  // Give unreadable-directory diagnostics a report slot. They are pseudo-entries (not engine
+  // files); the loop below prints the warning and coverage counts the gap separately.
+  for (const e of activeUnreadableDirs) {
+    files.push(e.path);
+    rels.push(e.rel || 'data/');
+  }
 
   let engine: CheckEngine;
   let externalEngine = false;
@@ -174,17 +435,26 @@ export async function checkDatapack(opts: CheckOptions): Promise<CheckResult> {
     engine = makeEngine(opts.engine);
   }
   try {
-    // pack.mcmeta is reported dpkit-side (see scanPackMcmeta) — don't hand it to the engine.
-    const engineFiles = mcmetaRel ? files.slice(0, -1) : files;
-    const engineRels = mcmetaRel ? rels.slice(0, -1) : rels;
-    // Post-scans (macro / entity-NBT) can start before the engine check when the version does
-    // not depend on the engine's pack.mcmeta auto-detection: resolve it from the cache first
-    // ('latest release' / pinned ids). 'auto' must wait for the engine's resolution.
     let preVersion: string | null = null;
-    if (opts.version !== 'auto') {
-      try { preVersion = resolveConcreteVersion(opts.version); } catch { preVersion = null; }
+    if (engineVersion !== 'auto') {
+      try { preVersion = resolveConcreteVersion(engineVersion); } catch { preVersion = null; }
     }
     const texts = preVersion ? readFileTexts(engineFiles, engineRels) : null;
+
+    // Data-less pack (only pack.mcmeta, or --files=pack.mcmeta) — don't start the engine at
+    // all; validate metadata and resolve the effective version from the format range.
+    if (engineFiles.length === 0) {
+      const resolvedVersion = versionPlan?.actualVersion
+        ?? autoDetected
+        ?? noEngineVersion(opts.version, mcmetaScan0?.minFormat ?? null, mcmetaScan0?.maxFormat ?? null)
+        ?? preVersion ?? opts.version;
+      const diagnosticsByRel = mergeDiagnostics(structuralDiags, unrecognizedDiags, unreadableDiags);
+      if (includeMcmeta) {
+        diagnosticsByRel.set(mcmetaRel, packMcmetaDiagnostics(mcmetaText, workRoot, resolvedVersion, true));
+      }
+      return assembleReport(opts, files, rels, diagnosticsByRel, new Set(), resolvedVersion, null, null, texts, workRoot, false, auxPacks, versionPlan, autoDetected, includeMcmeta, skippedOverlayFiles, activeUnreadableDirs.length, unreadableFileDiags.size);
+    }
+
     let res: EngineCheckResult;
     let post: PostScans;
     if (opts.engineSnapshot) {
@@ -195,14 +465,14 @@ export async function checkDatapack(opts: CheckOptions): Promise<CheckResult> {
         diagnosticsByRel: opts.engineSnapshot.diagnosticsByRel,
         failedRels: new Set(),
       };
-      post = runPostScans(opts, engineFiles, engineRels, res.resolvedVersion ?? preVersion ?? opts.version, texts ?? readFileTexts(engineFiles, engineRels));
+      post = runPostScans(opts, workRoot, engineFiles, engineRels, res.resolvedVersion ?? preVersion ?? engineVersion, texts ?? readFileTexts(engineFiles, engineRels), activeDataRootList);
     } else {
       const prescan = preVersion && texts
-        ? Promise.resolve().then(() => runPostScans(opts, engineFiles, engineRels, preVersion!, texts))
+        ? Promise.resolve().then(() => runPostScans(opts, workRoot, engineFiles, engineRels, preVersion!, texts, activeDataRootList))
         : null;
       res = await engine.check({
-        datapack: opts.datapack,
-        version: opts.version,
+        datapack: workRoot,
+        version: engineVersion,
         files: engineFiles,
         rels: engineRels,
         mode: opts.mode ?? 'open',
@@ -214,14 +484,21 @@ export async function checkDatapack(opts: CheckOptions): Promise<CheckResult> {
       // otherwise (engine resolved differently, or version was 'auto') run them now — still
       // sharing one file read across macro / entity-NBT / gotchas.
       const pre = await (prescan ?? Promise.resolve(null));
-      const scanVersion = res.resolvedVersion ?? preVersion ?? opts.version;
+      const scanVersion = res.resolvedVersion ?? preVersion ?? engineVersion;
       post = pre && (!res.resolvedVersion || res.resolvedVersion === preVersion)
         ? pre
-        : runPostScans(opts, engineFiles, engineRels, scanVersion, texts ?? readFileTexts(engineFiles, engineRels));
+        : runPostScans(opts, workRoot, engineFiles, engineRels, scanVersion, texts ?? readFileTexts(engineFiles, engineRels), activeDataRootList);
     }
+
     const macro = post.macro;
     const nbt = post.nbt;
-    const diagnosticsByRel = new Map(res.diagnosticsByRel);
+    const diagnosticsByRel = mergeDiagnostics(
+      new Map(res.diagnosticsByRel),
+      structuralDiags,
+      unrecognizedDiags,
+      unreadableDiags,
+      post.structure?.issuesByRel ?? null,
+    );
     if (macro) {
       for (const [rel, issues] of macro.issuesByRel) {
         const existing = diagnosticsByRel.get(rel) ?? [];
@@ -242,66 +519,141 @@ export async function checkDatapack(opts: CheckOptions): Promise<CheckResult> {
         }))]);
       }
     }
-    // pack.mcmeta: give it a clean/err entry so it's counted, not treated as an engine failure.
-    if (mcmetaRel) {
-      const d = scanPackMcmeta(mcmetaPath);
-      diagnosticsByRel.set(mcmetaRel, d ? [d] : []);
+    const targetVersion = res.resolvedVersion ?? versionPlan?.actualVersion ?? preVersion ?? engineVersion;
+    if (includeMcmeta) {
+      diagnosticsByRel.set(mcmetaRel, packMcmetaDiagnostics(mcmetaText, workRoot, targetVersion, true));
     }
-    return assembleReport(opts, files, rels, diagnosticsByRel, res.failedRels, res.resolvedVersion, macro, nbt, texts);
+    return assembleReport(opts, files, rels, diagnosticsByRel, res.failedRels, res.resolvedVersion ?? versionPlan?.actualVersion ?? null, macro, nbt, texts, workRoot, true, auxPacks, versionPlan, autoDetected, includeMcmeta, skippedOverlayFiles, activeUnreadableDirs.length, unreadableFileDiags.size);
   } finally {
     if (!externalEngine) await engine.close();
-  }
-}
-
-/**
- * Dpkit-side pack.mcmeta check. The engine's version auto-detect reads this file; a broken one
- * silently skews the version and previously produced 0 diagnostics. Returns a severity-1
- * (error) diagnostic when the file is unreadable / not valid JSON / missing the "pack" key.
- */
-function scanPackMcmeta(mcmetaPath: string): RawDiagnostic | null {
-  let text: string;
-  try { text = readFileSync(mcmetaPath, 'utf8'); }
-  catch (e) { return mcmetaErr(`pack.mcmeta could not be read: ${(e as Error).message}`); }
-  try {
-    const obj = JSON.parse(text) as unknown;
-    if (!obj || typeof obj !== 'object' || !('pack' in obj)) {
-      return mcmetaErr('pack.mcmeta is missing the "pack" key (format: {"pack": {"pack_format": N, "description": "…"}})');
+    for (const aux of auxPacks) {
+      try { aux.cleanup(); } catch { /* temp cleanup is best-effort */ }
     }
-    return null;
-  } catch (e) {
-    return mcmetaErr(`pack.mcmeta is not valid JSON: ${(e as Error).message}`);
+    cleanupExtracted?.();
   }
 }
 
-function mcmetaErr(message: string): RawDiagnostic {
-  return { severity: 1, message, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } };
+/** Merge several rel→diagnostics maps (later maps append; null maps are ignored). */
+function mergeDiagnostics(...maps: (Map<string, RawDiagnostic[]> | null)[]): Map<string, RawDiagnostic[]> {
+  const out = new Map<string, RawDiagnostic[]>();
+  for (const m of maps) mergeDiagnosticsInto(out, m);
+  return out;
+}
+
+/** Append one rel→diagnostics map into another (destructive). */
+function mergeDiagnosticsInto(out: Map<string, RawDiagnostic[]>, m: Map<string, RawDiagnostic[]> | null): void {
+  if (!m) return;
+  for (const [rel, ds] of m) {
+    const existing = out.get(rel) ?? [];
+    out.set(rel, [...existing, ...ds]);
+  }
+}
+
+/** pack.mcmeta diagnostics for the resolved target version. */
+function packMcmetaDiagnostics(mcmetaText: string | null, root: string, targetVersion: string | null, include = true): RawDiagnostic[] {
+  if (!include) return [];
+  if (mcmetaText === null) {
+    return [{
+      severity: 1,
+      message: 'pack.mcmeta not found or unreadable — every data pack needs this file at its root',
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+    }];
+  }
+  let concrete = targetVersion;
+  if (concrete && ['auto', 'latest release', 'latest snapshot'].includes(concrete)) {
+    try { concrete = resolveConcreteVersion(concrete); } catch { /* keep raw label */ }
+  }
+  return scanPackMcmeta(mcmetaText, root, {
+    version: concrete,
+    dataPackVersion: concrete ? dataPackVersionOf(concrete) : null,
+  }).diagnostics;
+}
+
+/** Effective version for a data-less pack (pack.mcmeta only, no engine started). */
+function noEngineVersion(version: string, minFormat: number | null, maxFormat: number | null): string | null {
+  if (version === 'auto' && maxFormat !== null) return resolveVersionForFormatRange(minFormat, maxFormat);
+  try { return resolveConcreteVersion(version); }
+  catch { return version === 'auto' ? null : version; }
 }
 
 /** Read every engine file once; the macro / entity-NBT / gotcha post-scans share these texts. */
 function readFileTexts(files: string[], rels: string[]): Map<string, string> {
   const texts = new Map<string, string>();
   for (let i = 0; i < files.length; i++) {
-    try { texts.set(rels[i], readFileSync(files[i], 'utf8')); } catch { /* unreadable — scans skip it */ }
+    try { texts.set(rels[i], readFileSync(files[i], 'utf8')); } catch { /* unreadable — scanUnreadableFiles reports it */ }
   }
   return texts;
 }
 
-interface PostScans {
-  macro: { issuesByRel: Map<string, MacroIssue[]>; stats: MacroStats; perFileUnchecked: Map<string, number> } | null;
-  nbt: { issuesByRel: Map<string, NbtIssue[]>; stats: NbtScanStats; perFileUnchecked: Map<string, number> } | null;
+/** Warning for text files that cannot be read at all (not checked silently). */
+function unreadableTextFileDiagnostics(files: string[], rels: string[]): Map<string, RawDiagnostic[]> {
+  const out = new Map<string, RawDiagnostic[]>();
+  for (let i = 0; i < files.length; i++) {
+    if (!files[i].endsWith('.mcfunction') && !files[i].endsWith('.json')) continue;
+    // openSync is a readability preflight without paying for a second full read of every file;
+    // the engine and post-scans still report any mid-read failure through their normal paths.
+    let fd: number | undefined;
+    try {
+      fd = openSync(files[i], 'r');
+    } catch (err) {
+      out.set(rels[i], [{
+        severity: 2,
+        message: `[check] file could not be read (${(err as Error).message}) — its contents were not checked`,
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      }]);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+  return out;
 }
 
-/** Run both content post-scans (macro registry IDs + entity NBT) with one shared file read. */
+interface MacroOutcome {
+  issuesByRel: Map<string, MacroIssue[]>;
+  stats: MacroStats;
+  perFileUnchecked: Map<string, number>;
+  uncheckedPositions: (MacroUncheckedPosition & { file: string })[];
+  /** .mcfunction files that actually contain $() macro lines. */
+  applicableFiles: number;
+  /** command data was not cached, so macro lines could not be validated. */
+  unavailable: boolean;
+}
+
+interface NbtOutcome {
+  issuesByRel: Map<string, NbtIssue[]>;
+  stats: NbtScanStats;
+  perFileUnchecked: Map<string, number>;
+  uncheckedPositions: (NbtUncheckedPosition & { file: string })[];
+  /** .mcfunction files that actually contain summon / data-merge candidates. */
+  applicableFiles: number;
+  /** vanilla-mcdoc schema was not cached, so entity NBT could not be validated. */
+  unavailable: boolean;
+}
+
+interface StructureOutcome {
+  issuesByRel: Map<string, RawDiagnostic[]>;
+}
+
+interface PostScans {
+  macro: MacroOutcome | null;
+  nbt: NbtOutcome | null;
+  structure: StructureOutcome | null;
+}
+
+/** Run content post-scans (macro registry IDs + entity NBT + structure NBT). */
 function runPostScans(
   opts: CheckOptions,
+  datapackRoot: string,
   files: string[],
   rels: string[],
   versionLabel: string | null,
   texts: Map<string, string>,
+  dataRoots: string[],
 ): PostScans {
   return {
-    macro: runMacroScan(opts, files, rels, versionLabel, texts),
-    nbt: runEntityNbtScan(opts, files, rels, versionLabel, texts),
+    macro: runMacroScan(opts, datapackRoot, files, rels, versionLabel, texts, dataRoots),
+    nbt: runEntityNbtScan(opts, datapackRoot, files, rels, versionLabel, texts, dataRoots),
+    structure: runStructureNbtScan(files, rels, versionLabel ?? opts.version),
   };
 }
 
@@ -311,11 +663,13 @@ function runPostScans(
  */
 function runMacroScan(
   opts: CheckOptions,
+  datapackRoot: string,
   files: string[],
   rels: string[],
   resolvedVersion: string | null,
-  texts?: Map<string, string>,
-): { issuesByRel: Map<string, MacroIssue[]>; stats: MacroStats; perFileUnchecked: Map<string, number> } | null {
+  texts: Map<string, string> | undefined,
+  dataRoots: string[],
+): MacroOutcome | null {
   if (opts.noMacro === true) return null;
   const versionLabel = resolvedVersion ?? opts.version;
   let tree: CommandTree | undefined;
@@ -323,7 +677,9 @@ function runMacroScan(
   let declared: Set<string> | undefined;
   const issuesByRel = new Map<string, MacroIssue[]>();
   const perFileUnchecked = new Map<string, number>();
-  const stats: MacroStats = { lines: 0, checked: 0, unchecked: 0 };
+  const uncheckedPositions: (MacroUncheckedPosition & { file: string })[] = [];
+  const stats: MacroStats = { lines: 0, checked: 0, unchecked: 0, syntaxChecked: 0, syntaxUnchecked: 0 };
+  let applicableFiles = 0;
 
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
@@ -332,49 +688,49 @@ function runMacroScan(
     if (text === undefined) {
       try { text = readFileSync(f, 'utf8'); } catch { continue; }
     }
-    if (!text.includes('$(')) continue;
+    if (!/(^|\n)[ \t]*\$(?!\w+\s*=)/.test(text)) continue;
+    applicableFiles++;
     // lazy-load the command tree + registries only once a macro line is actually present
     if (!tree) {
-      try { tree = loadCommandTree(versionLabel); } catch { return null; } // no cached tree → skip
+      try { tree = loadCommandTree(versionLabel); } catch { return { issuesByRel, stats, perFileUnchecked, uncheckedPositions, applicableFiles, unavailable: true }; }
       regs = loadRegistries(versionLabel);
     }
-    if (!declared) declared = buildDeclaredRegistryIds(opts.datapack);
+    if (!declared) declared = buildDeclaredRegistryIds(datapackRoot, dataRoots);
     const r = scanMacroRegistry(f, tree, regs, declared, text);
+    const macroUnchecked = r.unchecked + r.syntaxUnchecked;
     if (r.issues.length) issuesByRel.set(rels[i], r.issues);
-    if (r.unchecked > 0) perFileUnchecked.set(rels[i], r.unchecked);
+    if (macroUnchecked > 0) perFileUnchecked.set(rels[i], macroUnchecked);
+    for (const pos of r.uncheckedPositions) uncheckedPositions.push({ ...pos, file: rels[i] });
     stats.lines += r.lines;
     stats.checked += r.checked;
     stats.unchecked += r.unchecked;
+    stats.syntaxChecked += r.syntaxChecked;
+    stats.syntaxUnchecked += r.syntaxUnchecked;
   }
   if (stats.lines === 0) return null;
-  return { issuesByRel, stats, perFileUnchecked };
+  return { issuesByRel, stats, perFileUnchecked, uncheckedPositions, applicableFiles, unavailable: false };
 }
 
 /**
  * Scan .mcfunction files for entity NBT (summon / `data merge entity`) and validate field names +
- * nested registry IDs against the cached mcdoc schema. Returns null when disabled, when the mcdoc
- * tarball isn't cached yet, or when nothing to scan — so a pack without entity NBT pays nothing.
- * Mirrors runMacroScan's lazy loading.
+ * nested registry IDs against the cached mcdoc schema. Returns null when disabled or when there
+ * is nothing to scan; returns unavailable:true when candidate lines exist but the schema isn't
+ * cached (the report then says so instead of silently skipping).
  */
 function runEntityNbtScan(
   opts: CheckOptions,
+  datapackRoot: string,
   files: string[],
   rels: string[],
   resolvedVersion: string | null,
-  texts?: Map<string, string>,
-): { issuesByRel: Map<string, NbtIssue[]>; stats: NbtScanStats; perFileUnchecked: Map<string, number> } | null {
+  texts: Map<string, string> | undefined,
+  dataRoots: string[],
+): NbtOutcome | null {
   if (opts.noEntityNbt === true) return null;
   const versionLabel = resolvedVersion ?? opts.version;
-  let concrete: string;
-  try { concrete = resolveConcreteVersion(versionLabel); } catch { return null; }
-  const schema = loadEntitySchemas(concrete);
-  if (!schema) return null; // mcdoc tarball not cached yet → degrade to no-op
-  const regs = loadRegistries(concrete);
-  const declared = buildDeclaredRegistryIds(opts.datapack);
-  const issuesByRel = new Map<string, NbtIssue[]>();
-  const perFileUnchecked = new Map<string, number>();
-  const stats: NbtScanStats = { lines: 0, checked: 0, unchecked: 0 };
 
+  // Gather candidate files first: a pack without summon/data must not pay for schema loading.
+  const candidates: Array<{ file: string; rel: string; text: string }> = [];
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
     if (!f.endsWith('.mcfunction')) continue;
@@ -382,16 +738,49 @@ function runEntityNbtScan(
     if (text === undefined) {
       try { text = readFileSync(f, 'utf8'); } catch { continue; }
     }
-    if (!/\bsummon\b/.test(text) && !/\bdata\b/.test(text)) continue;
-    const r = scanEntityNbt(f, schema, regs, declared, concrete, text);
-    if (r.issues.length) issuesByRel.set(rels[i], r.issues);
-    if (r.unchecked > 0) perFileUnchecked.set(rels[i], r.unchecked);
+    if (/\bsummon\b/.test(text) || /\bdata\b/.test(text)) candidates.push({ file: f, rel: rels[i], text });
+  }
+  if (candidates.length === 0) return null;
+
+  let concrete: string;
+  try { concrete = resolveConcreteVersion(versionLabel); } catch {
+    return { issuesByRel: new Map(), stats: { lines: 0, checked: 0, unchecked: 0 }, perFileUnchecked: new Map(), uncheckedPositions: [], applicableFiles: candidates.length, unavailable: true };
+  }
+  const schema = loadEntitySchemas(concrete);
+  if (!schema) {
+    return { issuesByRel: new Map(), stats: { lines: 0, checked: 0, unchecked: 0 }, perFileUnchecked: new Map(), uncheckedPositions: [], applicableFiles: candidates.length, unavailable: true };
+  }
+  const regs = loadRegistries(concrete);
+  const declared = buildDeclaredRegistryIds(datapackRoot, dataRoots);
+  const issuesByRel = new Map<string, NbtIssue[]>();
+  const perFileUnchecked = new Map<string, number>();
+  const uncheckedPositions: (NbtUncheckedPosition & { file: string })[] = [];
+  const stats: NbtScanStats = { lines: 0, checked: 0, unchecked: 0 };
+  let applicableFiles = 0;
+
+  for (const { file, rel, text } of candidates) {
+    const r = scanEntityNbt(file, schema, regs, declared, concrete, text);
+    if (r.issues.length) issuesByRel.set(rel, r.issues);
+    if (r.unchecked > 0) perFileUnchecked.set(rel, r.unchecked);
+    for (const pos of r.uncheckedPositions) uncheckedPositions.push({ ...pos, file: rel });
     stats.lines += r.lines;
     stats.checked += r.checked;
     stats.unchecked += r.unchecked;
+    if (r.lines > 0) applicableFiles++;
   }
   if (stats.lines === 0) return null;
-  return { issuesByRel, stats, perFileUnchecked };
+  return { issuesByRel, stats, perFileUnchecked, uncheckedPositions, applicableFiles, unavailable: false };
+}
+
+/** Binary-NBT structure validation for data/<ns>/structure(s)/*.nbt. */
+function runStructureNbtScan(files: string[], rels: string[], versionLabel: string): StructureOutcome | null {
+  const issuesByRel = new Map<string, RawDiagnostic[]>();
+  for (let i = 0; i < files.length; i++) {
+    if (!files[i].endsWith('.nbt')) continue;
+    const ds = scanStructureNbt(files[i], rels[i], versionLabel);
+    if (ds.length) issuesByRel.set(rels[i], ds);
+  }
+  return issuesByRel.size ? { issuesByRel } : null;
 }
 
 
@@ -402,9 +791,18 @@ function assembleReport(
   diagnosticsByRel: Map<string, RawDiagnostic[]>,
   failedRels: Set<string>,
   resolvedVersion: string | null,
-  macro?: { stats: MacroStats; perFileUnchecked: Map<string, number> } | null,
-  nbt?: { stats: NbtScanStats; perFileUnchecked: Map<string, number> } | null,
+  macro?: MacroOutcome | null,
+  nbt?: NbtOutcome | null,
   texts?: Map<string, string> | null,
+  workRoot?: string,
+  engineUsed = true,
+  auxPacks: AuxPack[] = [],
+  versionPlan: VersionPlan | null = null,
+  autoDetected: string | null = null,
+  includeMcmeta = true,
+  overlayFilesSkipped = 0,
+  unreadableDirs = 0,
+  unreadableFiles = 0,
 ): CheckResult {
   const useIgnore = opts.ignore?.useIgnore ?? true;
   const ignoreFilter = createIgnoreFilter(opts.ignore ?? { useIgnore: true, extra: [] });
@@ -415,12 +813,17 @@ function assembleReport(
   const engineKind: EngineKind = engineLabel(opts.engine);
 
   let errorCount = 0, warnCount = 0, ignoredCount = 0, internalErr = 0, issueFiles = 0;
+  let knownFpCount = 0, symbolsResolved = 0, scopeHintsCount = 0;
   let deltaChangedFiles = 0, deltaResolvedFiles = 0;
   const lines: string[] = [];
   const byMessage = new Map<string, number>(); // message -> count (non-ignored only)
   const ignoredByMessage = new Map<string, number>(); // message -> count
   const issues: ReportIssue[] = []; // for --json
   const ignoredList: ReportIssue[] = []; // for --json
+  const resolvedSymbols: ResolvedSymbolReport[] = [];
+  const scopeHints: ScopeHint[] = [];
+  const workspacePaths = splitPathList([...(opts.workspace ?? []), ...(opts.additionalDatapacks ?? [])]);
+  const resourcePaths = splitPathList(opts.resourcePacks ?? []);
   // Baseline key uses the RESOLVED version (not the raw specifier like 'auto'), so --delta
   // doesn't compare issues computed against two different effective versions under one key.
   const baseVersion = resolvedVersion ?? opts.version;
@@ -432,17 +835,38 @@ function assembleReport(
   if (versionLabel === 'auto' || versionLabel === 'latest release' || versionLabel === 'latest snapshot') {
     try { versionLabel = resolveConcreteVersion(versionLabel); } catch { /* keep the raw label */ }
   }
+  const knownFpEnabled = enabledKnownFpRules(opts.falsePositives, useIgnore);
+  const providers: AuxPack[] = [
+    { kind: 'current', display: opts.datapack, root: workRoot ?? opts.datapack, symbols: scanPackSymbols(workRoot ?? opts.datapack, true), cleanup: () => {} },
+    ...auxPacks,
+  ];
+  const mcfunctionFileCount = files.filter(f => f.endsWith('.mcfunction')).length;
   // Coverage: files the engine failed to check, macro-line validation stats, auto-filter count.
   const coverage: CheckReport['coverage'] = {
     filesChecked: files.length,
     filesSkipped: failedRels.size,
+    engineUsed,
     macroLines: macro?.stats.lines ?? 0,
     macroChecked: macro?.stats.checked ?? 0,
     macroUnchecked: macro?.stats.unchecked ?? 0,
+    macroSyntaxChecked: macro?.stats.syntaxChecked ?? 0,
+    macroSyntaxUnchecked: macro?.stats.syntaxUnchecked ?? 0,
+    macroApplicableFiles: macro?.applicableFiles ?? 0,
+    macroNotApplicableFiles: Math.max(0, mcfunctionFileCount - (macro?.applicableFiles ?? 0)),
     nbtLines: nbt?.stats.lines ?? 0,
     nbtChecked: nbt?.stats.checked ?? 0,
     nbtUnchecked: nbt?.stats.unchecked ?? 0,
+    nbtApplicableFiles: nbt?.applicableFiles ?? 0,
+    nbtNotApplicableFiles: Math.max(0, mcfunctionFileCount - (nbt?.applicableFiles ?? 0)),
+    macroUnavailable: macro?.unavailable ?? false,
+    nbtUnavailable: nbt?.unavailable ?? false,
     autoFiltered: 0,
+    knownFalsePositives: 0,
+    macroUncheckedPositions: (macro?.uncheckedPositions ?? []).map(p => ({ ...p, file: p.file })),
+    nbtUncheckedPositions: (nbt?.uncheckedPositions ?? []).map(p => ({ ...p, file: p.file })),
+    overlayFilesSkipped,
+    unreadableDirs,
+    unreadableFiles,
   };
   // Data-driven vanilla registry/tag false-positive filtering: "Cannot find attribute
   // “minecraft:<valid-id>”" and "Cannot find tag/damage_type “minecraft:is_projectile”" are
@@ -467,34 +891,47 @@ function assembleReport(
       if (g.length) { gotchaByFile.set(rels[i], g); gotchaCount += g.length; }
     }
   }
-  const glog: GameLogReport = logCheck ? gameLogReport(opts.datapack, files, opts.minecraftRoot) : { found: false };
+  const logFiles = workRoot !== opts.datapack ? [opts.datapack] : files;
+  const glog: GameLogReport = logCheck ? gameLogReport(opts.datapack, logFiles, opts.minecraftRoot, workRoot ?? opts.datapack) : { found: false };
 
   const baseline = delta ? loadBaseline(baselineFile, opts.datapack, baseVersion, opts.version) : {};
+  const deltaBaselineCounts = { errors: 0, warnings: 0 };
+  const deltaNewCounts = { errors: 0, warnings: 0 };
+  const deltaResolvedCounts = { errors: 0, warnings: 0 };
 
   for (let i = 0; i < files.length; i++) {
     const f = files[i], rel = rels[i];
     const ds = diagnosticsByRel.get(rel);
     const prev = baseline[rel];
+    const prevCounts = sigCounts(prev?.sig);
+    deltaBaselineCounts.errors += prevCounts.errors;
+    deltaBaselineCounts.warnings += prevCounts.warnings;
 
-    if (!ds) {
-      // No diagnostics at all: either the server threw (logged) or it silently blocked.
+    if (failedRels.has(rel)) {
+      // Engine failure is always surfaced, even when a dpkit post-scan also has diagnostics for
+      // the same file — otherwise a macro/structural warning could mask a real engine failure.
       internalErr++; issueFiles++;
-      if (failedRels.has(rel)) {
-        const concrete = !['auto', 'latest release', 'latest snapshot'].includes(versionLabel);
-        const dataCached = concrete && cachedCommandVersions().has(versionLabel);
-        const why = dataCached ? 'see server log'
-          : concrete ? `command data for ${versionLabel} is not cached locally — the upstream fetch failed or was never downloaded`
-          : 'see server log';
-        lines.push(`\n== ${rel} ==  ⚠ server threw during check — no diagnostics (${why})`);
-      } else {
+      if (delta) deltaChangedFiles++;
+      const concrete = !['auto', 'latest release', 'latest snapshot'].includes(versionLabel);
+      const dataCached = concrete && cachedCommandVersions().has(versionLabel);
+      const why = dataCached ? 'see server log'
+        : concrete ? `command data for ${versionLabel} is not cached locally — the upstream fetch failed or was never downloaded`
+        : 'see server log';
+      lines.push(`\n== ${rel} ==  ⚠ server threw during check (${why})`);
+    }
+    if (!ds) {
+      // No diagnostics at all and no engine-failure marker: the check was silently blocked.
+      if (!failedRels.has(rel)) {
+        internalErr++; issueFiles++;
+        if (delta) deltaChangedFiles++;
         lines.push(`\n== ${rel} ==  ⚠ no diagnostics received — check blocked or server error`);
       }
-      if (delta) deltaChangedFiles++; // surface blocked files so they aren't silently hidden
       continue;
     }
     const nonIgnored: RawDiagnostic[] = [];
     for (const d of ds) {
-      const sev = d.severity === 1 ? 'E' : d.severity === 2 ? 'W' : '·';
+      const effectiveSeverity = d.severity === 4 && isWrongFolderDiagnostic(d.message) ? 2 : d.severity;
+      const sev = effectiveSeverity === 1 ? 'E' : effectiveSeverity === 2 ? 'W' : '·';
       // Engine gotcha linters (java-edition) emit "[gotcha] (<key>) <msg>" — partition them
       // into the separate gotchas section (never counted as errors/warnings/ignored).
       const gm = /^\[gotcha\] \((\S+?)\) (.*)$/.exec(d.message);
@@ -507,6 +944,43 @@ function assembleReport(
         gotchaCount++;
         continue;
       }
+
+      // Version-aware known-false-positive rules (independent of, and applied before, --ignore).
+      const fpText = texts?.get(rel) ?? (() => { try { return readFileSync(f, 'utf8'); } catch { return ''; } })();
+      const fp = matchKnownFalsePositive(d, { version: versionLabel, rel, fileText: fpText }, knownFpEnabled);
+      if (fp) {
+        knownFpCount++;
+        ignoredCount++;
+        coverage.knownFalsePositives++;
+        const key = `[known-fp:${fp.name}] ${d.message}`;
+        ignoredByMessage.set(key, (ignoredByMessage.get(key) ?? 0) + 1);
+        ignoredList.push({ file: rel, line: d.range.start.line + 1, char: d.range.start.character, severity: sev, message: `${key} — ${fp.description}` });
+        continue;
+      }
+
+      // Auxiliary symbol providers. Order = current pack > workspaces > resource packs.
+      const aux = resolveAuxSymbol(d.message, providers);
+      if (aux) {
+        if (aux.source === 'current') {
+          ignoredCount++;
+          coverage.autoFiltered++;
+          ignoredByMessage.set(d.message, (ignoredByMessage.get(d.message) ?? 0) + 1);
+          ignoredList.push({ file: rel, line: d.range.start.line + 1, char: d.range.start.character, severity: sev, message: `${d.message} — ${aux.note}` });
+        } else {
+          symbolsResolved++;
+          resolvedSymbols.push({
+            file: rel,
+            line: d.range.start.line + 1,
+            char: d.range.start.character,
+            symbol: aux.symbol,
+            source: aux.source as 'workspace' | 'resource-pack',
+            pack: aux.pack,
+            note: aux.note,
+          });
+        }
+        continue;
+      }
+
       const autoFiltered = useIgnore && isVanillaRegistryMiss(d.message, regs, getVanillaTags);
       if (ignoreFilter(d.message) || autoFiltered) {
         ignoredCount++;
@@ -515,15 +989,45 @@ function assembleReport(
         ignoredList.push({ file: rel, line: d.range.start.line + 1, char: d.range.start.character, severity: sev, message: d.message });
         continue;
       }
+
+      // Cross-pack symbols without --workspace become scope hints, not errors/warnings.
+      const cm = d.message.match(/^Cannot find ([\w/.-]+) [“"]([^”"]+)[”"]/);
+      if (useIgnore && knownFpEnabled.has('cross-pack-scope-hint') && workspacePaths.length === 0
+          && cm && SCOPE_HINT_CATEGORIES.has(cm[1]) && !cm[2].startsWith('minecraft:') && !cm[2].startsWith('#minecraft:')) {
+        scopeHintsCount++;
+        scopeHints.push({
+          file: rel,
+          line: d.range.start.line + 1,
+          char: d.range.start.character,
+          symbol: `${cm[1]} ${cm[2]}`,
+          message: `[scope hint] ${d.message} — not found in this datapack; if it is declared by another datapack, pass --workspace=<pack> (or --additional-datapacks=<pack>)`,
+        });
+        continue;
+      }
+
       nonIgnored.push(d);
       byMessage.set(d.message, (byMessage.get(d.message) ?? 0) + 1);
       issues.push({ file: rel, line: d.range.start.line + 1, char: d.range.start.character, severity: sev, message: d.message });
-      if (d.severity === 1) errorCount++;
-      else if (d.severity === 2) warnCount++;
+      if (effectiveSeverity === 1) errorCount++;
+      else if (effectiveSeverity === 2) warnCount++;
     }
 
     const sig = issueSig(nonIgnored);
     newBaseline.files[rel] = { sig };
+    const curCounts = sigCounts(sig);
+
+    // Delta arithmetic: new = issue counts that appeared/increased, resolved = disappeared/decreased.
+    if (delta) {
+      if (!prev && sig) {
+        deltaNewCounts.errors += curCounts.errors;
+        deltaNewCounts.warnings += curCounts.warnings;
+      } else if (prev && prev.sig !== sig) {
+        if (curCounts.errors > prevCounts.errors) deltaNewCounts.errors += curCounts.errors - prevCounts.errors;
+        if (curCounts.warnings > prevCounts.warnings) deltaNewCounts.warnings += curCounts.warnings - prevCounts.warnings;
+        if (prevCounts.errors > curCounts.errors) deltaResolvedCounts.errors += prevCounts.errors - curCounts.errors;
+        if (prevCounts.warnings > curCounts.warnings) deltaResolvedCounts.warnings += prevCounts.warnings - curCounts.warnings;
+      }
+    }
 
     const macroNote = (() => {
       const n = macro?.perFileUnchecked.get(rel);
@@ -540,7 +1044,7 @@ function assembleReport(
       if (changed && prev?.sig && sig === '') {
         // was broken last run, now clean (or all ignored) — surface it in delta mode
         deltaResolvedFiles++;
-        lines.push(`\n== ${rel} ==  ✓ resolved (previously ${prev.sig.split('\n').length} issue(s))`);
+        lines.push(`\n== ${rel} ==  ✓ resolved (previously ${prev.sig.split(String.fromCharCode(10)).length} issue(s))`);
         continue;
       }
       if (!changed) continue; // same issues as last run — nothing new to report
@@ -550,13 +1054,14 @@ function assembleReport(
       if (coverNote) lines.push(`\n== ${rel} ==${coverNote}`);
       continue; // only ignored diagnostics → effectively clean
     }
-    issueFiles++;
-    if (delta) deltaChangedFiles++;
+    if (!failedRels.has(rel)) issueFiles++;
+    if (delta && !failedRels.has(rel)) deltaChangedFiles++;
 
     lines.push(`\n== ${rel} (${nonIgnored.length}) ==${coverNote}`);
     for (const d of nonIgnored.sort((a, b) => (a.range.start.line - b.range.start.line) || (a.range.start.character - b.range.start.character))) {
       const line = d.range.start.line + 1, ch = d.range.start.character;
-      const sev = d.severity === 1 ? 'E' : d.severity === 2 ? 'W' : '·';
+      const effectiveSeverity = d.severity === 4 && isWrongFolderDiagnostic(d.message) ? 2 : d.severity;
+      const sev = effectiveSeverity === 1 ? 'E' : effectiveSeverity === 2 ? 'W' : '·';
       lines.push(`  [${sev}:${line}:${ch}] ${d.message}`);
     }
   }
@@ -575,20 +1080,59 @@ function assembleReport(
     ? { found: true as const, path: glog.log as string, stale: glog.stale as boolean, lastLoaded: glog.lastLoaded as string | null, errors: glog.hits as string[] }
     : { found: false as const };
 
+  const targetVersion = versionPlan?.targetVersion
+    ?? autoDetected
+    ?? (resolvedVersion && !['auto', 'latest release', 'latest snapshot'].includes(opts.version) ? opts.version : null);
+  const concreteTarget = targetVersion;
+  const versionInfo: VersionCheckInfo = {
+    target: opts.version,
+    targetVersion: concreteTarget,
+    actual: resolvedVersion,
+    cacheSource: versionPlan ? versionPlan.cacheSource : resolvedVersion ? 'engine resolved' : 'none',
+    fallback: versionPlan?.fallback ?? false,
+    targetDpv: concreteTarget ? dataPackVersionOf(concreteTarget) : versionPlan?.targetDpv ?? null,
+    actualDpv: resolvedVersion ? dataPackVersionOf(resolvedVersion) : versionPlan?.actualDpv ?? null,
+    uncheckedRange: versionPlan?.fallback
+      ? `requested ${versionPlan.targetVersion} (dpv ${versionPlan.targetDpv ?? '?'}) vs actual ${versionPlan.actualVersion} (dpv ${versionPlan.actualDpv ?? '?'})`
+      : 'none',
+    message: versionPlan?.message ?? null,
+  };
+
   const report: CheckReport = {
     datapack: opts.datapack,
     ...(opts.datapackSource ? { datapackSource: opts.datapackSource } : {}),
     version: opts.version,
     resolvedVersion,
+    versionInfo,
     files: { checked: files.length, clean },
-    summary: { errors: errorCount, warnings: warnCount, ignored: ignoredCount, internalFailures: internalErr, gotchas: gotchaCount },
+    summary: {
+      errors: errorCount,
+      warnings: warnCount,
+      ignored: ignoredCount,
+      internalFailures: internalErr,
+      gotchas: gotchaCount,
+      symbolsResolved,
+      scopeHints: scopeHintsCount,
+      knownFalsePositives: knownFpCount,
+    },
     issues,
     ignored: ignoredList,
+    resolvedSymbols,
+    scopeHints,
     gotchas: [...gotchaByFile.entries()].map(([file, items]) => ({ file, items })),
     log: logJson,
     byMessage: agg.map(([message, count]) => ({ message, count })),
     coverage,
-    ...(delta ? { delta: { changedFiles: deltaChangedFiles, resolvedFiles: deltaResolvedFiles } } : {}),
+    ...(delta ? {
+      delta: {
+        changedFiles: deltaChangedFiles,
+        resolvedFiles: deltaResolvedFiles,
+        baseline: deltaBaselineCounts,
+        current: { errors: errorCount, warnings: warnCount },
+        new: deltaNewCounts,
+        resolved: deltaResolvedCounts,
+      },
+    } : {}),
     engine: engineKind,
     schemaVersion: 1,
   };
@@ -690,7 +1234,7 @@ export function queryRegistry(name: string, version = DEFAULT_VERSION): Registry
   return { name: normalized, version: concrete, found: false, cached, count: 0, index: registryIndex(concrete) };
 }
 
-export async function listVersions(configured: string): Promise<VersionListResult> {
+export async function listVersions(configured: string, query?: string): Promise<VersionListResult> {
   let list: unknown[] | null = null, src = 'local cache';
   try {
     const res = await fetch('https://api.spyglassmc.com/mcje/versions', { signal: AbortSignal.timeout(6000) });
@@ -712,22 +1256,51 @@ export async function listVersions(configured: string): Promise<VersionListResul
   const recent = versions.slice(0, 14).map(v => ({
     id: v.id, type: v.type ?? '?', dpv: v.data_pack_version, hasData: cached.has(String(v.id)),
   }));
+  const q = query?.trim() || null;
+  const matches = (q ? filterVersionEntries(versions, q) : []).map(v => ({
+    id: v.id, type: v.type ?? '?', dpv: v.data_pack_version, hasData: cached.has(String(v.id)),
+  }));
   return {
     source: src,
     count: versions.length,
     configured,
+    query: q,
     latestRelease: latestRelease ? { id: latestRelease.id, data_pack_version: latestRelease.data_pack_version, hasData: cached.has(latestRelease.id) } : null,
     latestSnapshot: latestSnapshot ? { id: latestSnapshot.id, data_pack_version: latestSnapshot.data_pack_version } : null,
     newerThanConfigured,
     isPinned,
     recent,
+    matches,
   };
+}
+
+/** --versions search: id prefix/substring, or dpv:<data-pack-version>. */
+function filterVersionEntries(versions: McmetaVersion[], query: string): McmetaVersion[] {
+  const q = query.trim();
+  if (!q) return versions;
+  const dpvMatch = /^dpv:(\d+)$/.exec(q);
+  if (dpvMatch) {
+    const dpv = Number(dpvMatch[1]);
+    return versions.filter(v => v.data_pack_version === dpv);
+  }
+  return versions.filter(v => {
+    const id = String(v.id ?? '');
+    return id === q || id.startsWith(q) || id.toLowerCase().includes(q.toLowerCase());
+  });
 }
 
 // ---- gotchas without an engine (pure file scan) ------------------------------
 export function scanGotchasStandalone(datapack: string, only = '', version = DEFAULT_VERSION): { file: string; items: GotchaIssue[] }[] {
+  if (isZipPath(datapack)) {
+    throw new DpkitError('[check] scan_gotchas does not support .zip datapacks yet — run check_datapack instead.', EXIT_USAGE);
+  }
   const label = resolveConcreteVersion(version);
-  const { files, rels } = collectFiles(datapack, only);
+  let overlays: ReturnType<typeof scanPackMcmeta>['overlays'] = [];
+  try { overlays = scanPackMcmeta(readFileSync(join(datapack, 'pack.mcmeta'), 'utf8')).overlays; } catch { /* pack.mcmeta unreadable — engine/pack check reports it */ }
+  const dpv = dataPackVersionOf(label);
+  const activeDirs = activeOverlayDirs(overlays, dpv);
+  const activeRoots = activeDataRoots(datapack, overlays, dpv);
+  const { files, rels } = collectFiles(datapack, only, activeDirs);
   const dataDir = join(datapack, 'data');
   // Macro-line registry IDs are also surfaced here (key "macro-registry"), loaded lazily.
   let tree: CommandTree | undefined;
@@ -745,7 +1318,7 @@ export function scanGotchasStandalone(datapack: string, only = '', version = DEF
           regs = loadRegistries(label);
         }
         if (tree) {
-          if (!declared) declared = buildDeclaredRegistryIds(datapack);
+          if (!declared) declared = buildDeclaredRegistryIds(datapack, activeRoots);
           const r = scanMacroRegistry(files[i], tree, regs, declared, text);
           for (const iss of r.issues) items.push({ line: iss.line, key: iss.key, msg: iss.msg });
         }

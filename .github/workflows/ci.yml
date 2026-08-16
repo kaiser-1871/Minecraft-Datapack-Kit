@@ -4,9 +4,15 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-node${{ matrix.node-version }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -19,6 +25,17 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: node dpkit.mjs --cache-versions=1.14,1.15.2,1.16.5,1.18.2,1.19.4,1.20.4,1.21.4,1.21.11,26.2
       - run: node --test "tests/**/*.test.mjs"
+      - name: multi-version matrix
+        env:
+          DPKIT_TEST_VERSIONS: 1.14,1.15.2,1.16.5,1.18.2,1.19.4,1.20.4,1.21.4,1.21.11,26.2
+        run: node --test tests/multi-version.spec.mjs
       - run: node tests/mcp-smoke.mjs
-      - run: node tests/parity.mjs
+      - name: parity across cached releases
+        run: |
+          for v in 1.14 1.15.2 1.16.5 1.18.2 1.19.4 1.20.4 1.21.4 1.21.11 26.2; do
+            echo "::group::parity $v"
+            DPKIT_PARITY_VERSION="$v" node tests/parity.mjs
+            echo "::endgroup::"
+          done

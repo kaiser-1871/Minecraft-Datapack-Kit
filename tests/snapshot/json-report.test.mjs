@@ -15,7 +15,8 @@ test('--json report shape is stable (top-level keys and field types)', async () 
   // top-level keys (rename/remove/add a field → this breaks)
   assert.deepEqual(Object.keys(report).sort(), [
     'byMessage', 'coverage', 'datapack', 'engine', 'files', 'gotchas', 'ignored',
-    'issues', 'log', 'resolvedVersion', 'schemaVersion', 'summary', 'version',
+    'issues', 'log', 'resolvedSymbols', 'resolvedVersion', 'schemaVersion', 'scopeHints',
+    'summary', 'version', 'versionInfo',
   ].sort());
 
   // schema version gate
@@ -23,13 +24,18 @@ test('--json report shape is stable (top-level keys and field types)', async () 
   assert.equal(report.engine, 'inproc');
 
   // summary field types
-  for (const k of ['errors', 'warnings', 'ignored', 'internalFailures', 'gotchas']) {
+  for (const k of ['errors', 'warnings', 'ignored', 'internalFailures', 'gotchas', 'symbolsResolved', 'scopeHints', 'knownFalsePositives']) {
     assert.equal(typeof report.summary[k], 'number', `summary.${k} should be a number`);
   }
 
   // coverage field types
-  for (const k of ['filesChecked', 'filesSkipped', 'macroLines', 'macroChecked', 'macroUnchecked', 'nbtLines', 'nbtChecked', 'nbtUnchecked', 'autoFiltered']) {
+  for (const k of ['filesChecked', 'filesSkipped', 'macroLines', 'macroChecked', 'macroUnchecked', 'macroApplicableFiles', 'macroNotApplicableFiles', 'nbtLines', 'nbtChecked', 'nbtUnchecked', 'nbtApplicableFiles', 'nbtNotApplicableFiles', 'autoFiltered', 'knownFalsePositives', 'overlayFilesSkipped', 'unreadableDirs', 'unreadableFiles']) {
     assert.equal(typeof report.coverage[k], 'number', `coverage.${k} should be a number`);
+  }
+  assert.ok(Array.isArray(report.coverage.macroUncheckedPositions));
+  assert.ok(Array.isArray(report.coverage.nbtUncheckedPositions));
+  for (const k of ['engineUsed', 'macroUnavailable', 'nbtUnavailable']) {
+    assert.equal(typeof report.coverage[k], 'boolean', `coverage.${k} should be a boolean`);
   }
 
   // files
@@ -65,4 +71,10 @@ test('--json report shape is stable (top-level keys and field types)', async () 
     assert.equal(typeof m.message, 'string');
     assert.equal(typeof m.count, 'number');
   }
+
+  // new stable sections
+  assert.equal(typeof report.versionInfo.target, 'string');
+  assert.equal(typeof report.versionInfo.cacheSource, 'string');
+  assert.ok(Array.isArray(report.resolvedSymbols));
+  assert.ok(Array.isArray(report.scopeHints));
 });

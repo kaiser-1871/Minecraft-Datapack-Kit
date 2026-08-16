@@ -1,5 +1,6 @@
 // macrocheck.test.mjs — literal registry-ID validation inside $ macro lines.
-// Uses the real cached 26.2 command tree + registries (same data the engine uses).
+// Uses the real cached command tree + registries (same data the engine uses). 26.2 is the fixed
+// regression anchor; cross-version macro coverage is in tests/multi-version.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -59,19 +60,26 @@ test('tags and custom namespaces are never warned (marked unchecked)', () => {
   assert.ok(r.unchecked >= 2);
 });
 
-test('pack-declared data-driven registry entry suppresses the warning', () => {
+test('pack-declared data-driven registry entry suppresses the warning (namespace-aware)', () => {
   // datapack declares data/minecraft/damage_type/my_type.json → minecraft:my_type is valid
-  const declared = new Set(['damage_type/my_type']);
+  const declared = new Set(['damage_type/minecraft/my_type']);
   const r = scan('$damage $(t) 2 minecraft:my_type\n', declared);
   assert.equal(r.issues.length, 0);
-  // without the declaration it IS flagged
-  const r2 = scan('$damage $(t) 2 minecraft:my_type\n');
+  // data/test/... must only satisfy test:my_type, never minecraft:my_type
+  const declaredTest = new Set(['damage_type/test/my_type']);
+  const r2 = scan('$damage $(t) 2 minecraft:my_type\n', declaredTest);
   assert.equal(r2.issues.length, 1);
+  const r3 = scan('$damage $(t) 2 test:my_type\n', declaredTest);
+  assert.equal(r3.issues.length, 0);
+  // without any declaration it IS flagged
+  const r4 = scan('$damage $(t) 2 minecraft:my_type\n');
+  assert.equal(r4.issues.length, 1);
 });
 
-test('macro assignment lines and lines without interpolation are skipped', () => {
+test('macro assignment lines are skipped, but lines without interpolation are scanned', () => {
   const r = scan('$var = 5\n$execute run say hi\n# comment $execute run damage $(t) 2 x\n');
-  assert.equal(r.lines, 0); // no line with $( … ) → nothing scanned
+  assert.equal(r.lines, 1); // only $execute is a command; assignment and comment are skipped
+  assert.equal(r.issues.length, 0);
 });
 
 test('first-token interpolation (whole command is a macro) is unchecked, never warned', () => {
@@ -91,9 +99,9 @@ test('buildDeclaredRegistryIds collects registry entries (and skips tags)', () =
     writeFileSync(join(dir, 'data', 'test', 'worldgen', 'biome', 'my_biome.json'), '{}');
     writeFileSync(join(dir, 'data', 'test', 'tags', 'damage_type', 'is_magic.json'), '{}');
     const d = buildDeclaredRegistryIds(dir);
-    assert.ok(d.has('damage_type/my_type'));
-    assert.ok(d.has('worldgen/biome/my_biome'));
-    assert.ok(!d.has('tags/damage_type/is_magic'));
+    assert.ok(d.has('damage_type/test/my_type'));
+    assert.ok(d.has('worldgen/biome/test/my_biome'));
+    assert.ok(!d.has('tags/damage_type/test/is_magic'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -105,4 +113,24 @@ test('multitoken interpolation at a position arg stops conservatively (no false 
   assert.equal(r.issues.length, 0);
   assert.equal(r.checked, 0);
   assert.ok(r.unchecked >= 4);
+});
+
+test('clearly invalid literal numbers/ranges in macro lines are flagged', () => {
+  const r = scan('$execute if score @s test matches $(r) run effect give @s minecraft:speed banana\n');
+  assert.equal(r.issues.length, 1);
+  assert.equal(r.issues[0].key, 'macro-syntax');
+  assert.ok(r.issues[0].msg.includes('banana'));
+  assert.equal(r.syntaxChecked, 1);
+});
+
+test('valid literal numeric arguments are counted as syntax-checked, not warned', () => {
+  const r = scan('$effect give $(target) minecraft:speed 2 1\n');
+  assert.equal(r.issues.length, 0);
+  assert.ok(r.syntaxChecked >= 2, `expected seconds+amplifier to be checked, got ${r.syntaxChecked}`);
+});
+
+test('literal arguments without a conservative validator are syntax-unchecked, never warned', () => {
+  const r = scan('$execute as $(src) run say hello\n');
+  assert.equal(r.issues.length, 0);
+  assert.ok(r.syntaxUnchecked >= 1, `expected hello to be syntax-unchecked, got ${r.syntaxUnchecked}`);
 });

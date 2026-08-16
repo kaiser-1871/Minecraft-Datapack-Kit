@@ -6,6 +6,10 @@
 // Defaults follow .dpkit.json (cwd → home, or $DPKIT_CONFIG) so any user can point the
 // tools at their own datapack/version. Precedence: per-call arg > $DPKIT_DATAPACK /
 // $DPKIT_VERSION > .dpkit.json > built-in default.
+//
+// Output shaping: every success response is an ENVELOPE — it keeps the pre-existing top-level
+// JSON shape and only ADDS ok:true plus count/total/truncated/hint metadata, and truncates
+// oversized arrays (see src/mcp-shape.ts). Errors keep the legacy {error} JSON + isError:true.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -13,11 +17,12 @@ import * as api from './api.js';
 import { DEFAULT_VERSION, loadConfig } from './config.js';
 import { detectDefaultDatapack } from './datapack-discovery.js';
 import { ensureVersionData } from './version-data.js';
-
-const errorText = (e: unknown): { content: { type: 'text'; text: string }[]; isError: true } => ({
-  content: [{ type: 'text', text: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }) }],
-  isError: true,
-});
+import { errResult, jsonResult, ok, truncate } from './mcp-shape.js';
+import { registerWorkflowPrompt } from './prompt-workflow.js';
+import { readGameLogs } from './logreader.js';
+import { ensureBlockStates, getBlockStates, listBlockStates } from './block-states.js';
+import { ensureVanillaData, getVanillaFile, searchVanillaFiles, VANILLA_CATEGORIES } from './vanilla-data.js';
+import { CommandDataNotCachedError } from './syntax.js';
 
 export async function main(): Promise<void> {
   let cfg;
@@ -46,7 +51,7 @@ export async function main(): Promise<void> {
 
   server.registerTool('check_datapack', {
     description:
-      'Check a Minecraft datapack with the Spyglass/DHP engine and return a structured report: diagnostics, known-false-positive ' +
+      'Check a Minecraft datapack (directory or .zip) with the Spyglass/DHP engine and return a structured report: diagnostics, known-false-positive ' +
       'ignores (LastHurtMob), known-gotcha hints (silent-failure patterns), and a game-log self-check. ' +
       'Datapack/version default to the .dpkit.json config or $DPKIT_DATAPACK / $DPKIT_VERSION.',
     inputSchema: {
@@ -75,9 +80,26 @@ export async function main(): Promise<void> {
         noLog: args.noLog,
         minecraftRoot: cfg.minecraftRoot,
       });
-      return { content: [{ type: 'text', text: JSON.stringify(r.report, null, 2) }] };
+      const report = r.report;
+      const issues = truncate(report.issues, 200, 're-run with files= to narrow the check');
+      const ignored = truncate(report.ignored, 200);
+      const gotchas = truncate(report.gotchas, 100);
+      return jsonResult(ok({
+        ...report,
+        count: issues.total,
+        issues: issues.items,
+        issuesTotal: issues.total,
+        issuesTruncated: issues.truncated,
+        ...(issues.hint ? { issuesHint: issues.hint } : {}),
+        ignored: ignored.items,
+        ignoredTotal: ignored.total,
+        ignoredTruncated: ignored.truncated,
+        gotchas: gotchas.items,
+        gotchasTotal: gotchas.total,
+        gotchasTruncated: gotchas.truncated,
+      }));
     } catch (e) {
-      return errorText(e);
+      return errResult(e);
     }
   });
 
@@ -94,9 +116,19 @@ export async function main(): Promise<void> {
     try {
       const version = await ensureVersionData(ver(args.version), ['commands']);
       const r = api.querySyntax(args.path, version, args.depth ?? 4);
-      return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
+      const t = truncate(r.lines, 300, 're-run with a larger depth= to expand deeper');
+      return jsonResult(ok({
+        path: r.path,
+        version: r.version,
+        found: r.found,
+        lines: t.items,
+        count: t.total,
+        total: t.total,
+        truncated: t.truncated,
+        ...(t.hint ? { hint: t.hint } : {}),
+      }));
     } catch (e) {
-      return errorText(e);
+      return errResult(e);
     }
   });
 
@@ -123,9 +155,20 @@ export async function main(): Promise<void> {
         column: args.column,
         engine: pickEngine(args.engine),
       });
-      return { content: [{ type: 'text', text: JSON.stringify({ file: args.file, line: args.line, column: args.column, version, count: items.length, items }, null, 2) }] };
+      const t = truncate(items, 200, 'narrow the cursor position or file to reduce the result set');
+      return jsonResult(ok({
+        file: args.file,
+        line: args.line,
+        column: args.column,
+        version,
+        count: items.length,
+        items: t.items,
+        total: t.total,
+        truncated: t.truncated,
+        ...(t.hint ? { hint: t.hint } : {}),
+      }));
     } catch (e) {
-      return errorText(e);
+      return errResult(e);
     }
   });
 
@@ -134,18 +177,37 @@ export async function main(): Promise<void> {
       'List the values of a registry for a game version (offline, from the cached Spyglass registry data). ' +
       'Use to check whether an ID like minecraft:knockback exists in the target version before writing it, ' +
       'especially inside $ macro lines where the engine does not validate registry IDs. Unknown registry → the ' +
-      'full registry index with counts.',
+      'full registry index with counts. Pass search= to filter a large registry (item has 1000+ entries) before ' +
+      'the list is truncated.',
     inputSchema: {
       registry: z.string().describe('Registry name, e.g. mob_effect, attribute, damage_type (namespaced form also accepted).'),
       version: z.string().optional().describe('Game version. Defaults to config / $DPKIT_VERSION.'),
+      search: z.string().optional().describe('Case-insensitive substring filter applied to the FULL registry before truncation.'),
     },
   }, async (args) => {
     try {
       const version = await ensureVersionData(ver(args.version), ['registries']);
       const r = api.queryRegistry(args.registry, version);
-      return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
+      if (!r.found) {
+        return jsonResult(ok(r));
+      }
+      const search = args.search?.trim().toLowerCase();
+      const full = r.values ?? [];
+      const filtered = search ? full.filter(v => v.toLowerCase().includes(search)) : full;
+      const t = truncate(filtered, 200, 'pass search= to filter the full registry before truncation');
+      return jsonResult(ok({
+        name: r.name,
+        version: r.version,
+        found: r.found,
+        cached: r.cached,
+        values: t.items,
+        count: full.length,
+        total: t.total,
+        truncated: t.truncated,
+        ...(t.hint ? { hint: t.hint } : {}),
+      }));
     } catch (e) {
-      return errorText(e);
+      return errResult(e);
     }
   });
 
@@ -159,9 +221,9 @@ export async function main(): Promise<void> {
   }, async (args) => {
     try {
       const v = await api.listVersions(ver(args.configured));
-      return { content: [{ type: 'text', text: JSON.stringify(v, null, 2) }] };
+      return jsonResult(ok(v));
     } catch (e) {
-      return errorText(e);
+      return errResult(e);
     }
   });
 
@@ -179,11 +241,140 @@ export async function main(): Promise<void> {
       const version = ver(args.version);
       const datapack = args.datapack ?? defaultDatapack(version);
       const gotchas = api.scanGotchasStandalone(datapack, args.files ?? '', version);
-      return { content: [{ type: 'text', text: JSON.stringify({ datapack, version, count: gotchas.length, gotchas }, null, 2) }] };
+      const t = truncate(gotchas, 100, 'pass files= to narrow the scan');
+      return jsonResult(ok({
+        datapack,
+        version,
+        count: gotchas.length,
+        gotchas: t.items,
+        total: t.total,
+        truncated: t.truncated,
+        ...(t.hint ? { hint: t.hint } : {}),
+      }));
     } catch (e) {
-      return errorText(e);
+      return errResult(e);
     }
   });
+
+  server.registerTool('read_logs', {
+    description:
+      'Diagnose runtime problems: auto-detect the official / Prism / TLauncher launcher latest.log (including rotated ' +
+      '.log.gz logs) and return the tail content. Point minecraftRoot= at a Minecraft install base dir to override the ' +
+      'default launcher location (defaults to the config minecraftRoot).',
+    inputSchema: {
+      launcher: z.enum(['default', 'prism', 'tlauncher']).optional().describe('Launcher to read from. Omit to auto-detect (prism → default → tlauncher).'),
+      instance: z.string().optional().describe('Prism instance name (only meaningful with Prism Launcher).'),
+      lines: z.number().int().min(1).max(1000).optional().describe('Lines per file. Default 100.'),
+      tail: z.boolean().optional().describe('Return the last N lines (default true) or the first N (false).'),
+      minecraftRoot: z.string().optional().describe('Override base dir; defaults to config minecraftRoot.'),
+    },
+  }, async (args) => {
+    try {
+      const r = readGameLogs({
+        launcher: args.launcher,
+        instance: args.instance,
+        lines: args.lines,
+        tail: args.tail,
+        minecraftRoot: args.minecraftRoot ?? cfg.minecraftRoot,
+      });
+      return jsonResult(ok(r));
+    } catch (e) {
+      return errResult(e);
+    }
+  });
+
+  server.registerTool('get_block_states', {
+    description:
+      'List block ids, or query a single block\'s state properties/defaults, for a game version (offline, from the cached ' +
+      'Spyglass block_states data). Omit block= to list all block ids (truncated with a total); pass block= (bare or ' +
+      'minecraft:-prefixed) to get { properties, defaults }.',
+    inputSchema: {
+      version: z.string().optional().describe('Game version. Defaults to config / $DPKIT_VERSION.'),
+      block: z.string().optional().describe('Block id (bare or minecraft:-prefixed). Omit to list all block ids.'),
+    },
+  }, async (args) => {
+    const requested = ver(args.version);
+    try {
+      const version = await ensureBlockStates(requested);
+      if (!args.block) {
+        const blocks = listBlockStates(version);
+        const t = truncate(blocks, 200, 'pass block= to query a single block');
+        return jsonResult({
+          ok: true,
+          version,
+          blocks: t.items,
+          count: blocks.length,
+          total: t.total,
+          truncated: t.truncated,
+          ...(t.hint ? { hint: t.hint } : {}),
+        });
+      }
+      const entry = getBlockStates(version, args.block);
+      if (!entry) {
+        return jsonResult({
+          ok: false,
+          version,
+          block: args.block,
+          found: false,
+          error: `Unknown block "${args.block}" in version ${version}. Omit block= to list all blocks.`,
+        });
+      }
+      const id = args.block.startsWith('minecraft:') ? args.block.slice('minecraft:'.length) : args.block;
+      return jsonResult({
+        ok: true,
+        version,
+        block: id,
+        found: true,
+        properties: entry.properties,
+        defaults: entry.defaults,
+      });
+    } catch (e) {
+      if (e instanceof CommandDataNotCachedError) {
+        return jsonResult({ ok: false, version: requested, error: e.message });
+      }
+      return errResult(e);
+    }
+  });
+
+  server.registerTool('get_vanilla_data', {
+    description:
+      'Query Misode\'s mcmeta summary data (the vanilla game\'s own data files) for a game version, cached in the same offline ' +
+      'cache. category is one of: ' + VANILLA_CATEGORIES.join(', ') + '. Pass path= to return a single vanilla file\'s JSON ' +
+      '(untruncated); otherwise pass search= to filter file keys (the key list is truncated with a total).',
+    inputSchema: {
+      version: z.string().describe('Game version, e.g. "1.21.4", "26.2", or "latest release".'),
+      category: z.string().describe('Vanilla data category (see tool description for the full list).'),
+      path: z.string().optional().describe('Fetch one vanilla file by key (e.g. "chests/ancient_city" for loot_table); full JSON, not truncated.'),
+      search: z.string().optional().describe('Case-insensitive substring filter over file keys (used when path is omitted).'),
+    },
+  }, async (args) => {
+    try {
+      const ensure = await ensureVanillaData(args.version, args.category);
+      if (!ensure.ok) {
+        return jsonResult(ensure);
+      }
+      const version = ensure.version;
+      if (args.path !== undefined && args.path !== '') {
+        const r = getVanillaFile(version, ensure.category, args.path);
+        return jsonResult(r);
+      }
+      const r = searchVanillaFiles(version, ensure.category, args.search ?? '');
+      if (!r.ok) return jsonResult(r);
+      const t = truncate(r.matches, 200, 'pass search= to filter, or path= to fetch a single file');
+      return jsonResult({
+        ...r,
+        matches: t.items,
+        total: t.total,
+        truncated: t.truncated,
+        ...(t.hint ? { hint: t.hint } : {}),
+      });
+    } catch (e) {
+      return errResult(e);
+    }
+  });
+
+  // prompts/list — a version-first workflow prompt (see src/prompt-workflow.ts).
+  registerWorkflowPrompt(server);
 
   const transport = new StdioServerTransport();
   try {

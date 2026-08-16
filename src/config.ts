@@ -33,6 +33,18 @@ export interface DpkitConfig {
   gotchas?: boolean;
   /** Enable the game-log self-check (default true). */
   logcheck?: boolean;
+  /** Workspace datapacks (symbol providers only, not checked). */
+  workspace?: string[];
+  /** Alias for workspace. */
+  additionalDatapacks?: string[];
+  /** Resource packs (read-only sounds/font/lang symbol providers). */
+  resourcePacks?: string[];
+  /** Missing-cache behavior for pinned versions: download | fallback | fail. */
+  cacheMiss?: 'download' | 'fallback' | 'fail';
+  /** Known-false-positive rules: false disables all; a string array enables a subset. */
+  falsePositives?: boolean | string[];
+  /** Also run a full separate check for every workspace datapack. */
+  checkWorkspace?: boolean;
 }
 
 /** Zod schema for .dpkit.json. `.strict()` rejects unknown keys (e.g. a typo'd "datapak")
@@ -45,6 +57,12 @@ const configSchema = z.object({
   baselineFile: z.string().optional(),
   gotchas: z.boolean().optional(),
   logcheck: z.boolean().optional(),
+  workspace: z.array(z.string()).optional(),
+  additionalDatapacks: z.array(z.string()).optional(),
+  resourcePacks: z.array(z.string()).optional(),
+  cacheMiss: z.enum(['download', 'fallback', 'fail']).optional(),
+  falsePositives: z.union([z.boolean(), z.array(z.string())]).optional(),
+  checkWorkspace: z.boolean().optional(),
 }).strict();
 
 /** Locate the config file to use, or null when none is configured. */
@@ -79,6 +97,12 @@ export function loadConfig(explicit?: string): { config: DpkitConfig; path: stri
     if (parsed.baselineFile !== undefined) cfg.baselineFile = resolvePath(parsed.baselineFile, path);
     if (parsed.gotchas !== undefined) cfg.gotchas = parsed.gotchas;
     if (parsed.logcheck !== undefined) cfg.logcheck = parsed.logcheck;
+    if (parsed.workspace !== undefined) cfg.workspace = parsed.workspace.map(v => resolvePath(v, path));
+    if (parsed.additionalDatapacks !== undefined) cfg.additionalDatapacks = parsed.additionalDatapacks.map(v => resolvePath(v, path));
+    if (parsed.resourcePacks !== undefined) cfg.resourcePacks = parsed.resourcePacks.map(v => resolvePath(v, path));
+    if (parsed.cacheMiss !== undefined) cfg.cacheMiss = parsed.cacheMiss;
+    if (parsed.falsePositives !== undefined) cfg.falsePositives = parsed.falsePositives;
+    if (parsed.checkWorkspace !== undefined) cfg.checkWorkspace = parsed.checkWorkspace;
     return { config: cfg, path };
   } catch (err) {
     throw new Error(`[dpkit] config file ${path} could not be parsed: ${(err as Error).message}`);

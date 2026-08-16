@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { scanGotchas } from '../../dist/gotchas.js';
+// Most fixtures use 26.2 as a fixed label; ender-eye gotcha is version-gated and has a pre-1.21.4
+// assertion in the same test. Cross-version smoke coverage is in tests/multi-version.test.mjs.
 import { scanGotchasStandalone } from '../../dist/api.js';
 
 function tmp(name, content) {
@@ -58,6 +60,26 @@ test('clean file has no gotchas', () => {
   assert.equal(scanGotchas(f.p, 'z.mcfunction', '26.2').length, 0);
   f.cleanup();
 });
+
+test('ender_eye item definition with consumable triggers the throw/consume_item gotcha', () => {
+  const f = tmp('ender_eye.json', '{ "components": { "minecraft:consumable": {} } }');
+  const g = scanGotchas(f.p, 'minecraft/item/ender_eye.json', '26.2');
+  assert.equal(g.length, 1);
+  assert.equal(g[0].key, 'ender-eye-consumable');
+  assert.ok(g[0].msg.includes('consume_item'));
+
+  const older = scanGotchas(f.p, 'minecraft/item/ender_eye.json', '1.21.3');
+  assert.equal(older.length, 0, 'consumable did not exist before 1.21.4');
+  f.cleanup();
+});
+
+test('other items with consumable do not trigger the ender_eye gotcha', () => {
+  const f = tmp('apple.json', '{ "components": { "minecraft:consumable": {} } }');
+  const g = scanGotchas(f.p, 'minecraft/item/apple.json', '26.2');
+  assert.equal(g.length, 0);
+  f.cleanup();
+});
+
 
 // ---- attribute multiplier direction: add_multiplied_* is ×(1+v); positive boosts, not halves ----
 

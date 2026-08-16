@@ -6,8 +6,13 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const MCP = process.env.DPKIT_MCP ?? 'dist/mcp.js';
+// Version the smoke test exercises. 'latest release' keeps the suite from being pinned to one
+// release; set DPKIT_TEST_VERSION to a concrete id for a focused run.
+const TEST_VERSION = process.env.DPKIT_TEST_VERSION ?? 'latest release';
 // Self-contained fixture datapack, so the smoke test runs on any machine (no external datapack needed).
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'pack');
 const child = spawn(process.execPath, [MCP], { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -60,7 +65,9 @@ async function call(name, args) {
   return { parsed, isErr };
 }
 
-const TOOLS = ['check_datapack', 'query_syntax', 'complete_at', 'list_registry', 'list_versions', 'scan_gotchas'];
+const TOOLS = ['check_datapack', 'query_syntax', 'complete_at', 'list_registry', 'list_versions', 'scan_gotchas', 'read_logs', 'get_block_states', 'get_vanilla_data'];
+
+let logRoot;
 
 try {
   const init = await request('initialize', {
@@ -75,18 +82,34 @@ try {
   const names = (tools?.tools ?? []).map(t => t.name);
   for (const t of TOOLS) assert(names.includes(t), `tools/list includes ${t}`);
 
+  const prompts = await request('prompts/list', {});
+  const promptNames = (prompts?.prompts ?? []).map(p => p.name);
+  assert(promptNames.includes('dpkit-workflow'), 'prompts/list includes dpkit-workflow');
+  const prompt = await request('prompts/get', { name: 'dpkit-workflow' });
+  const promptText = (prompt?.messages ?? []).map(m => (m?.content?.type === 'text' ? m.content.text : '')).join('\n');
+  assert(promptText.includes('query_syntax') && promptText.includes('list_registry') && promptText.includes('check_datapack'),
+    'dpkit-workflow names the dpkit tools');
+
+  // A fake default-launcher logs dir so read_logs can be exercised deterministically (offline).
+  logRoot = mkdtempSync(join(tmpdir(), 'dpkit-mcp-smoke-'));
+  mkdirSync(join(logRoot, 'logs'), { recursive: true });
+  writeFileSync(join(logRoot, 'logs', 'latest.log'), 'smoke line 1\nsmoke line 2\nsmoke line 3\n');
+
   const which = process.argv[2];
   const targets = which ? [which] : TOOLS;
   const results = {};
   for (const name of targets) {
     if (!names.includes(name)) { assert(false, `tools/list includes ${name}`); continue; }
     const args = {
-      query_syntax: { path: 'execute on', version: '26.2' },
-      list_versions: { configured: '26.2' },
-      scan_gotchas: { datapack: FIXTURE, files: 'test/function/gotcha.mcfunction' },
-      list_registry: { registry: 'mob_effect', version: '26.2' },
-      complete_at: { datapack: FIXTURE, file: 'test/function/gotcha.mcfunction', line: 1, column: 24 },
-      check_datapack: { datapack: FIXTURE },
+      query_syntax: { path: 'execute on', version: TEST_VERSION },
+      list_versions: { configured: TEST_VERSION },
+      scan_gotchas: { datapack: FIXTURE, files: 'test/function/gotcha.mcfunction', version: TEST_VERSION },
+      list_registry: { registry: 'mob_effect', version: TEST_VERSION },
+      complete_at: { datapack: FIXTURE, file: 'test/function/gotcha.mcfunction', line: 1, column: 24, version: TEST_VERSION },
+      check_datapack: { datapack: FIXTURE, version: TEST_VERSION },
+      read_logs: { launcher: 'default', minecraftRoot: logRoot, lines: 5 },
+      get_block_states: { version: TEST_VERSION },
+      get_vanilla_data: { version: TEST_VERSION, category: 'loot_table', search: 'ancient_city' },
     }[name];
     results[name] = await call(name, args);
   }
@@ -100,6 +123,7 @@ try {
     const r = results.list_registry.parsed;
     assert(r?.found === true, 'list_registry mob_effect → found');
     assert(Array.isArray(r?.values) && r.values.includes('speed'), 'list_registry values include "speed"');
+    assert(r?.ok === true, 'list_registry returns the ok:true envelope');
   }
   if (results.list_versions) {
     const r = results.list_versions.parsed;
@@ -117,11 +141,49 @@ try {
     const r = results.check_datapack.parsed;
     assert(r && typeof r.summary?.errors === 'number' && typeof r.summary?.warnings === 'number',
       'check_datapack returns summary with error/warning counts');
+    assert(r?.ok === true, 'check_datapack returns the ok:true envelope');
+  }
+  if (results.read_logs) {
+    const r = results.read_logs.parsed;
+    assert(typeof r?.success === 'boolean', 'read_logs returns a success boolean');
+    assert(r?.ok === true, 'read_logs returns the ok:true envelope');
+    assert(r?.success === true, 'read_logs finds the fake latest.log (success:true)');
+    assert(Array.isArray(r?.logs) && r.logs.length > 0, 'read_logs success → non-empty logs array');
+    const first = r?.logs?.[0];
+    assert(first && typeof first.file === 'string' && typeof first.path === 'string' &&
+      typeof first.size === 'number' && typeof first.linesShown === 'number' && typeof first.content === 'string',
+      'read_logs log entries carry file/path/size/linesShown/content');
+    // failure branch: a minecraftRoot with no logs → success:false + error string (shape only).
+    const emptyRoot = mkdtempSync(join(tmpdir(), 'dpkit-mcp-smoke-empty-'));
+    const emptyRes = await call('read_logs', { launcher: 'default', minecraftRoot: emptyRoot });
+    const er = emptyRes.parsed;
+    assert(er?.success === false, 'read_logs on an empty root → success:false');
+    assert(typeof er?.error === 'string' && er.error.length > 0, 'read_logs on an empty root → error string');
+    rmSync(emptyRoot, { recursive: true, force: true });
+  }
+  if (results.get_block_states) {
+    const r = results.get_block_states.parsed;
+    assert(r && typeof r.ok === 'boolean', 'get_block_states returns an ok boolean');
+    if (r?.ok === true) {
+      assert(Array.isArray(r.blocks) && typeof r.total === 'number', 'get_block_states list → blocks array + total');
+    } else {
+      assert(typeof r?.error === 'string' && r.error.length > 0, 'get_block_states uncached → structured error');
+    }
+  }
+  if (results.get_vanilla_data) {
+    const r = results.get_vanilla_data.parsed;
+    assert(r && typeof r.ok === 'boolean', 'get_vanilla_data returns an ok boolean');
+    if (r?.ok === true) {
+      assert(Array.isArray(r.matches) && typeof r.total === 'number', 'get_vanilla_data search → matches array + total');
+    } else {
+      assert(typeof r?.error === 'string' && r.error.length > 0, 'get_vanilla_data uncached → structured error');
+    }
   }
 } catch (e) {
   failures++;
   console.error('[mcp] smoke failed:', e.message);
 } finally {
+  if (logRoot) rmSync(logRoot, { recursive: true, force: true });
   setTimeout(() => child.kill(), 200);
 }
 

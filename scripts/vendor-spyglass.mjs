@@ -25,7 +25,12 @@ if (!existsSync(join(spyglassRoot, 'packages', 'core', 'src'))) {
 }
 
 console.log(`[vendor] building ${spyglassRoot} with tsgo …`);
-const build = spawnSync('npx', ['tsgo', '-b', 'packages'], { cwd: spyglassRoot, stdio: 'inherit', shell: true });
+// `npx` is a `.cmd` shim on Windows and cannot be spawned directly without a shell; invoke it
+// explicitly through cmd.exe there (the same thing `shell: true` did), keeping the arguments
+// fixed so no user input ever reaches a shell string. On POSIX, `npx` is a real executable.
+const build = process.platform === 'win32'
+  ? spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', 'npx tsgo -b packages'], { cwd: spyglassRoot, stdio: 'inherit' })
+  : spawnSync('npx', ['tsgo', '-b', 'packages'], { cwd: spyglassRoot, stdio: 'inherit' });
 if (build.status !== 0) {
   console.error('[vendor] build failed — aborting (nothing copied)');
   process.exit(1);

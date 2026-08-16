@@ -61,6 +61,7 @@ test('saveBaseline migrates a legacy single-entry store to multi-entry form', ()
     saveBaseline(file, { datapack: 'DP', version: '26.2', files: { 'new.mcfunction': { sig: '2:y' } } });
     const raw = JSON.parse(readFileSync(file, 'utf8'));
     assert.equal(raw.schema, 2);
+    assert.equal(raw.formatVersion, 2);
     assert.equal(raw.datapack, undefined);
     assert.equal(raw.version, undefined);
     assert.equal(raw.files, undefined);

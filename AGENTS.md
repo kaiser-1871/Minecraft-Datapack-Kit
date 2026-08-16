@@ -1,6 +1,8 @@
 # AGENTS.md — dpkit (universal datapack checker: CLI / CI / AI, check + per-version syntax)
 
-This tool is **universal**: it checks any datapack, against any game version. Defaults come
+This tool is **version-universal within the upstream data range**: it checks any datapack against
+any version from **1.14** (earliest command data) through the latest release/snapshot. 1.13 and
+older are rejected with a clear error — no upstream command-tree/registry data exists for them. Defaults come
 from `.dpkit.json` (lookup order cwd → home, or `--config=<path>`; see `.dpkit.example.json`).
 The repo itself ships no save/datapack content — what a bare `node dpkit.mjs` checks is decided
 by the config. **For a different pack / version always pass `--datapack=` / `--version=` or edit
@@ -15,7 +17,10 @@ compiled to `dist/`. The root `dpkit.mjs` is a shim; `node dpkit.mjs` usage is u
 in-process engine (drives `@spyglassmc/core`'s `Project` directly, no subprocess);
 `--engine=lsp` keeps the old LSP-subprocess path for parity. There is also an MCP server
 (`npm run mcp`, tools check_datapack / query_syntax / complete_at / list_registry / list_versions /
-scan_gotchas) and a typed API (`dist/api.d.ts`).
+scan_gotchas / read_logs / get_vanilla_data / get_block_states, plus a `dpkit-workflow` prompt) and
+a typed API (`dist/api.d.ts`). MCP tool results are enveloped: success adds `ok:true` (and
+`count`/`total`), errors keep the legacy `{error}` + `isError:true` and add `ok:false`; large arrays
+are truncated with `total`/`truncated`/`hint` (helpers live in `src/mcp-shape.ts`).
 **Engine (self-contained, after the P1 upgrade)**: the `@spyglassmc/*` packages are NOT from
 npm — the built output of the 8 engine packages (core / java-edition / json / locales / mcdoc /
 mcfunction / nbt / language-server) is **vendored inside this repo** at `vendor/spyglass/`
@@ -25,11 +30,19 @@ no external Spyglass checkout and no network. To refresh the engine from a sourc
 `npm run vendor -- --spyglass=<path>` (rebuilds with `npx tsgo -b packages`, re-syncs
 `vendor/spyglass/`, refreshes `BUILD.json`), then `npm install`. `node dpkit.mjs --check-updates`
 reports whether Spyglass's GitHub `main` has moved since the engine was vendored.
-Regression tests: `npm test` (unit + fixture integration + CLI smoke + MCP smoke); perf baseline: `npm run bench`; correctness gate:
-`npm run parity` (inproc vs LSP per-file issueSig equality, defaults to the self-contained
-fixture, `DPKIT_PARITY_DATAPACK` can point at a real pack); `npm run test:all` = test + parity.
+Regression tests: `npm test` (unit + fixture integration + CLI smoke + MCP smoke);
+`npm run test:versions` runs the multi-version matrix (`tests/multi-version.spec.mjs`,
+`DPKIT_TEST_VERSIONS`, default `1.14,1.15.2,1.16.5,1.18.2,1.19.4,1.20.4,1.21.4,1.21.11,26.2`;
+uncached versions are skipped, CI pre-warms full engine data with
+`node dpkit.mjs --cache-versions=…`); perf baseline: `npm run bench`; correctness gate:
+`npm run parity` (inproc vs LSP per-file issueSig equality; version defaults to `latest release`,
+set `DPKIT_PARITY_VERSION` for a specific release, and `DPKIT_PARITY_DATAPACK` for a real pack);
+`npm run test:all` = test + multi-version matrix + parity.
 Key in-process-engine gotcha: projectRoot must go through `core.normalizeUri` (lowercases the
 drive letter), otherwise `analyzeProject`'s case-sensitive match finds 0 files and analyzes nothing.
+
+Examples below use 26.2 because it is the current latest release; they are not a default pin.
+The tool's default is `auto`, and every query/check is per-version.
 
 ## Before writing a command: check ground-truth syntax (important)
 
@@ -78,8 +91,9 @@ node dpkit.mjs --datapack=D:\other-pack --version=1.21.4 # check any other datap
   (0 diagnostics); now it reports a parse error.
 - Known false positives `Unknown key "LastHurtMob"` and `Cannot find <reg> "minecraft:<valid-id>"`
   (vanilla registry not declared in the pack) are auto-filtered; `--no-ignore` shows raw diagnostics.
-- Exit codes: 0 = no errors, 1 = errors (including internal failures; warnings also count with
-  `--strict`), 2 = environment/network failure, 4 = usage/configuration error.
+- Exit codes: 0 = no errors, 1 = the report contains errors (including file-level engine
+  internal failures; warnings also count with `--strict`), 2 = environment/network failure or
+  dpkit's own uncaught crash, 4 = usage/configuration error.
 
 ## Config (.dpkit.json)
 
@@ -99,12 +113,24 @@ and the report header prints where the datapack came from (`from --datapack` / `
 }
 ```
 
+`minecraftRoot` also feeds the MCP `read_logs` tool (a `minecraftRoot=` arg overrides it).
+
 ## Versions and known issues
+
+- **Support range**: upstream per-version data starts at **1.14** (dpv 4). Requests for
+  1.13/older are rejected with an explicit "no version data before 1.14" error, never checked
+  with a newer grammar. `--versions` prints the checkable release range.
+- **Full engine pre-warm**: `--cache-versions` now downloads commands, registries, block states,
+  `vanilla-data/tarball`, and `vanilla-assets-tiny/tarball`. Old releases otherwise fail engine
+  initialization because the engine's own fetch timeout is shorter than the slow 1.14/1.15-era
+  endpoints; dpkit pre-warms missing dependencies before starting the engine.
 
 - **Defaults to auto, not pinned**: version comes from `--version=` / `DPKIT_VERSION` / config's
   `version` / built-in default `auto` (`DEFAULT_VERSION` in `src/config.ts`). `auto` reads the
-  pack's pack.mcmeta, pinning nothing; but packs with `min_format`/`max_format` get detected as a
-  newer version — pin the version in config/args when you need to fix it. Offline syntax/gotcha
+  pack's pack.mcmeta; packs with `min_format`/`max_format` **and** a base `pack_format` now prefer
+  the release matching that base dpv when it is inside the declared range (`pack_format:94,
+  min_format:88, max_format:9999999` → `1.21.11`). Range-only packs still resolve to the newest
+  in-range release — pin `--version=` when that is not the intended target. Offline syntax/gotcha
   scans (`--syntax`/`--dump`) default to the latest release in the local cache, and now
   auto-download missing per-version data when online (`--cache-versions=a,b` pre-warms a set;
   `--versions --uncached` lists what's missing; all in `src/version-data.ts`).
@@ -121,14 +147,30 @@ and the report header prints where the datapack came from (`from --datapack` / `
   gotchas report section (never counted as errors/warnings), and `--no-gotchas` disables the rules
   in the engine config. The JSON gotchas (advancement damage nesting / multi-criteria-OR) remain a
   dpkit post-scan (`src/gotchas.ts`), which the standalone MCP scan_gotchas tool runs in full.
-  There is also `$` macro-line registry validation (`src/macrocheck.ts`, on by
+  There is also `$` macro-line validation (`src/macrocheck.ts`, on by
   default, `--no-macro` disables): the engine does **no validation** on macro lines, so dpkit walks
-  the command tree independently and checks literal IDs outside `$(...)` against the registry,
-  reporting a `[macro]` Warning on a miss; conservative by design — macro variables / custom
-  namespaces / `#tag` / desynced tree traversal are marked "unchecked" and never warned, and
-  pack-declared data-driven registries are auto-allowed. The report carries a `coverage` line
-  (macro lines / checked / unchecked / auto-filtered), and files with unchecked positions are
-  annotated.
+  the command tree independently, checks literal IDs outside `$(...)` against the registry
+  (`[macro]` Warning on a miss), and also validates clearly invalid literal numbers / ranges /
+  booleans / coordinates (`[macro] macro-syntax`). Conservative by design — macro variables /
+  custom namespaces / `#tag` / desynced tree traversal / parsers without a safe validator are
+  marked "unchecked" and never warned; pack-declared data-driven registries are auto-allowed only
+  for the declaring namespace (`data/x/advancement/foo.json` validates `x:foo`, not `minecraft:foo`).
+  The report carries a `coverage` line (macro lines / registry-ID checked / literal-syntax checked /
+  unchecked), and files with unchecked positions are annotated.
+- **File-set validation** (`src/collect.ts` / `src/datapack-structure.ts` / `src/pack-mcmeta.ts`):
+  collects `.mcfunction`/`.json`/`.nbt` under `data/` **and pack.mcmeta overlay dirs**
+  (`@overlay:<dir>/` rels); overlays whose `formats` range does not contain the target version's
+  data-pack version are skipped (coverage: `overlayFilesSkipped`; unknown dpv keeps all
+  overlays). It validates every resource-location path + case collisions, reports unrecognized
+  data files as dpkit warnings (they are never sent to the LSP engine), promotes wrong-folder
+  engine Hints to Warnings, deeply validates pack.mcmeta (format fields, version match,
+  overlays), and turns unreadable data directories/files into `[check]` warnings
+  (`coverage.unreadableDirs` / `coverage.unreadableFiles`) instead of silent skips. A pack with
+  only `pack.mcmeta` checks without an engine. `.zip` datapacks are extracted by
+  `src/zip-datapack.ts` for checks (`--watch`/`--complete` still want a directory); zip entries
+  with exact/case-only duplicate paths are rejected before extraction.
+- **Structure-NBT validation** (`src/structure-nbt.ts`): binary NBT parser for
+  `data/<ns>/structure(s)/*.nbt` (raw/gzip/zlib, required top-level keys).
 - **Entity-NBT schema validation** (`src/entity-nbt.ts`, on by default, `--no-entity-nbt`
   disables): the engine's NBT schema is loose, so dpkit validates `summon` / `data merge entity`
   NBT against the cached `vanilla-mcdoc` tarball (same schema the engine uses). The tarball's
@@ -154,6 +196,8 @@ and the report header prints where the datapack came from (`from --datapack` / `
   but `--syntax`/`--registry` offline queries are unaffected; macro-line **registry-ID validation**
   is done by dpkit post-processing (above). To complete, write the fragment to a normal line first,
   or use `--complete-inline="<command>"`.
+- Game-log self-check (`src/logcheck.ts`) now delegates discovery/reading to
+  `src/logreader.ts` (official / Prism / TLauncher, rotated `.log.gz`), like MCP `read_logs`.
 - `--watch` is incremental: plain file edits re-parse/bind/check only the changed files in the
   pooled engine (mtime diffing drives `engine.updateFile()`), then re-render the report from the
   engine's live diagnostics snapshot; file additions/removals or a pack.mcmeta change rebuild the

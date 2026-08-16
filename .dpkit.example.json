@@ -5,5 +5,11 @@
   "baselineFile": ".dpkit-baseline.json",
   "ignore": [],
   "gotchas": true,
-  "logcheck": true
+  "logcheck": true,
+  "workspace": [],
+  "additionalDatapacks": [],
+  "resourcePacks": [],
+  "cacheMiss": "download",
+  "falsePositives": true,
+  "checkWorkspace": false
 }

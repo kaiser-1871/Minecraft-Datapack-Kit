@@ -38,9 +38,14 @@ class LspSession {
   /** Echo for server log lines, already prefixed ([server] / [server-msg]). */
   onLog: ((msg: string) => void) | null = null;
 
-  constructor() {
+  constructor(verbose: boolean) {
     this.child.stdout.on('data', (d: Buffer) => this.#onData(d));
-    this.child.stderr.on('data', (d: Buffer) => process.stderr.write(d));
+    // Always drain the server's stderr pipe (so a chatty server can't backpressure-block the
+    // child), but only echo it to our stderr in verbose mode — otherwise it's noise on the
+    // --engine=lsp path. Important server errors still surface via stdout JSON-RPC + onLog.
+    this.child.stderr.on('data', (d: Buffer) => {
+      if (verbose) process.stderr.write(d);
+    });
     this.child.on('error', err => {
       this.#rejectAll(new Error(`failed to start Spyglass server: ${err.message}\n[check] is node_modules installed? (run: npm install)  server=${SERVER}`));
     });
@@ -87,7 +92,7 @@ class LspSession {
     }
   }
 
-  #handleMessage(msg: { id?: unknown; method?: string; error?: unknown; result?: unknown; params?: any }): void {
+  #handleMessage(msg: { id?: unknown; method?: string; error?: unknown; result?: unknown; params?: unknown }): void {
     if (msg.id !== undefined && msg.id !== null) {
       const entry = this.pending.get(msg.id as number);
       if (entry) {
@@ -107,32 +112,36 @@ class LspSession {
       }
       return;
     }
+    // JSON-RPC notification params are heterogeneous; each branch narrows the fields it reads
+    // (all values stay `unknown` so a malformed frame is handled, never trusted).
+    const params = (msg.params ?? {}) as { [key: string]: unknown };
     switch (msg.method) {
       case 'textDocument/publishDiagnostics': {
-        const uri = normUri(msg.params.uri);
+        const uri = normUri(params.uri as string);
         if (!this.opened.has(uri)) return; // ignore diagnostics for non-client-managed files
-        this.diagnostics.set(uri, msg.params.diagnostics ?? []);
+        this.diagnostics.set(uri, (params.diagnostics as RawDiagnostic[] | undefined) ?? []);
         this.settled.add(uri);
         this.#checkSettled();
         break;
       }
       case 'window/logMessage': {
-        this.serverLog.push(msg.params.message);
-        const m = msg.params.message.match(/\[Project\] \[check\] Failed for (file:\/\/\S+)/);
+        const message = params.message as string;
+        this.serverLog.push(message);
+        const m = message.match(/\[Project\] \[check\] Failed for (file:\/\/\S+)/);
         if (m) {
           const uri = normUri(m[1]);
           this.failed.add(uri);
           this.settled.add(uri);
           this.#checkSettled();
         }
-        this.onLog?.(`[server] ${msg.params.message}`);
+        this.onLog?.(`[server] ${message}`);
         break;
       }
       case 'window/showMessage':
-        this.onLog?.(`[server-msg] ${msg.params.message}`);
+        this.onLog?.(`[server-msg] ${params.message as string}`);
         break;
       case '$/progress': {
-        if (msg.params.token === 'initialize' && msg.params.value?.kind === 'end') {
+        if (params.token === 'initialize' && (params.value as { kind?: unknown } | undefined)?.kind === 'end') {
           this.readyFlag = true;
           this.#readyAll(true);
         }
@@ -225,7 +234,7 @@ const SERVER_LOG_FILTER = /Error|error|resolveConfiguredVersion|check] Failed|Ca
 
 export function createLspEngine(): CheckEngine {
   async function boot(opts: { version: string; datapack: string; verbose: boolean; onLog?: (msg: string) => void }): Promise<LspSession> {
-    const session = new LspSession();
+    const session = new LspSession(opts.verbose);
     session.onLog = (msg) => {
       if (opts.verbose || SERVER_LOG_FILTER.test(msg)) opts.onLog?.(msg);
     };

@@ -97,6 +97,7 @@ Relative paths resolve against the config file's directory. Fields:
 | `cacheMiss` | `download` (default) / `fallback` / `fail` for missing per-version data |
 | `falsePositives` | `false` disables all rules; a string array enables a subset |
 | `checkWorkspace` | Also run a full separate check for every workspace datapack |
+| `plugins` | Plugin module paths (resolved relative to the config file), e.g. `["./tools/my-plugin.mjs"]` |
 
 Per-value precedence: **CLI flag > env var > config file > built-in default**. Env vars:
 `DPKIT_DATAPACK`, `DPKIT_VERSION`, `DPKIT_CONFIG` (recognized by both CLI and MCP; empty strings count
@@ -151,6 +152,57 @@ jobs:
       - run: npx --yes dpkit-mc --datapack=pack --version=26.2 --strict   # exit 1 blocks the merge
 ```
 
+## Plugins, init, and test helpers (new)
+
+> Design inspired by [mcbeet/beet](https://github.com/mcbeet/beet) — the Minecraft pack
+> development kit. dpkit borrows Beet's plugin/`Context` pipeline, project scaffolding, and
+> test-first ergonomics while keeping its own focus as a checker.
+
+### `dpkit init` scaffolding
+
+```bash
+node dpkit.mjs init                    # write .dpkit.json + GitHub Actions in cwd
+node dpkit.mjs init --no-ci            # only write .dpkit.json
+node dpkit.mjs init --dir=my-pack --version=1.21.4 --force
+```
+
+### Plugin system
+
+Plugins can inspect the collected file set before a check and add/transform issues after the
+report is assembled. They can be passed through the API, via `.dpkit.json` `plugins`, or via
+`--plugin=<path>`:
+
+```js
+// tools/my-plugin.mjs
+export default {
+  name: 'my-rule',
+  afterCheck({ report }) {
+    // push directly and keep summary in sync, or use the addIssue helper
+    report.issues.push({ file: 'pack.mcmeta', line: 1, char: 0, severity: 'W', message: 'hello' });
+    report.summary.warnings++;
+  },
+};
+```
+
+```bash
+node dpkit.mjs --datapack=pack --plugin=./tools/my-plugin.mjs
+```
+
+### Test helpers (Node test / any assertion library)
+
+```js
+import { assertDatapackClean, assertDatapackSnapshot } from 'dpkit-mc/testing';
+
+test('pack is clean', async () => {
+  await assertDatapackClean({ datapack: 'pack', version: '1.21.4' });
+});
+
+test('report matches golden snapshot', async () => {
+  await assertDatapackSnapshot({ datapack: 'pack', version: '1.21.4' });
+});
+```
+
+Use `DPKIT_UPDATE_SNAPSHOTS=1` to refresh a snapshot baseline.
 
 ## Multi-pack workspaces & read-only resource packs (new in 1.0)
 

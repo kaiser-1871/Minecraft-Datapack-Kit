@@ -45,6 +45,8 @@ export interface DpkitConfig {
   falsePositives?: boolean | string[];
   /** Also run a full separate check for every workspace datapack. */
   checkWorkspace?: boolean;
+  /** Plugin module paths (relative paths resolve against the config file's directory). */
+  plugins?: string[];
 }
 
 /** Zod schema for .dpkit.json. `.strict()` rejects unknown keys (e.g. a typo'd "datapak")
@@ -63,6 +65,7 @@ const configSchema = z.object({
   cacheMiss: z.enum(['download', 'fallback', 'fail']).optional(),
   falsePositives: z.union([z.boolean(), z.array(z.string())]).optional(),
   checkWorkspace: z.boolean().optional(),
+  plugins: z.array(z.string()).optional(),
 }).strict();
 
 /** Locate the config file to use, or null when none is configured. */
@@ -103,6 +106,7 @@ export function loadConfig(explicit?: string): { config: DpkitConfig; path: stri
     if (parsed.cacheMiss !== undefined) cfg.cacheMiss = parsed.cacheMiss;
     if (parsed.falsePositives !== undefined) cfg.falsePositives = parsed.falsePositives;
     if (parsed.checkWorkspace !== undefined) cfg.checkWorkspace = parsed.checkWorkspace;
+    if (parsed.plugins !== undefined) cfg.plugins = parsed.plugins.map(v => resolvePath(v, path));
     return { config: cfg, path };
   } catch (err) {
     throw new Error(`[dpkit] config file ${path} could not be parsed: ${(err as Error).message}`);

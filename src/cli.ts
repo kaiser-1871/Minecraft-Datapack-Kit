@@ -18,14 +18,30 @@ import type { DpkitConfig } from './config.js';
 import { BUILTIN_IGNORE_DESC } from './ignore.js';
 import { cachedCommandVersions, CommandDataNotCachedError, loadCachedVersions } from './syntax.js';
 import { downloadToCache, ENGINE_DATA_KINDS, ensureVersionData, VERSIONS_LIST_URL } from './version-data.js';
+import { loadPluginModules } from './plugins.js';
+import type { DpkitPlugin } from './plugins.js';
+import { initCommand } from './init.js';
 import * as api from './api.js';
+
+// ---- subcommands: `dpkit init` and the `dpkit check` alias -------------------
+const RAW_ARGV = process.argv.slice(2);
+if (RAW_ARGV[0] === 'init') {
+  try {
+    await initCommand(RAW_ARGV.slice(1));
+    process.exit(0);
+  } catch (err) {
+    console.error(`[init] ${(err as Error).message}`);
+    process.exit(4);
+  }
+}
+const CLI_ARGV = RAW_ARGV[0] === 'check' ? RAW_ARGV.slice(1) : RAW_ARGV;
 
 // ---- parse CLI args (util.parseArgs: --name=value or --name value, --no-*, repeatable --ignore) ----
 const { values: V } = (() => {
   try {
     // `--versions` doubles as a boolean listing flag and a search flag (--versions=1.21).
     // parseArgs treats a bare string option as a missing value, so normalize the bare form.
-    const ARGV = process.argv.slice(2).map(a => a === '--versions' ? '--versions=' : a);
+    const ARGV = CLI_ARGV.map(a => a === '--versions' ? '--versions=' : a);
     return parseArgs({
       args: ARGV,
       options: {
@@ -66,6 +82,7 @@ const { values: V } = (() => {
         'cache-miss': { type: 'string' },
         'no-false-positives': { type: 'boolean' },
         'check-workspace': { type: 'boolean' },
+        plugin: { type: 'string', multiple: true },
       },
       strict: true,
     });
@@ -154,6 +171,8 @@ if (!['download', 'fallback', 'fail'].includes(CACHE_MISS)) {
 }
 const NO_FALSE_POSITIVES = V['no-false-positives'] === true;
 const CHECK_WORKSPACE = V['check-workspace'] === true || cfg.checkWorkspace === true;
+const PLUGIN_SPECS = [...(cfg.plugins ?? []), ...(V.plugin ?? [])];
+let PLUGINS: DpkitPlugin[] = [];
 
 // ---- "teach AI to write" modes ----
 const SYNTAX = V.syntax ?? '';                  // offline: render grammar of a command path
@@ -207,12 +226,14 @@ function printHelp(): void {
   console.log(`dpkit — Datapack Kit (Spyglass/DHP engine: check + teach syntax)
 
 Usage:
-  node dpkit.mjs [options]
+  node dpkit.mjs [check] [options]   Check a datapack (the default command)
+  node dpkit.mjs init [dir]          Scaffold a .dpkit.json (+ CI workflow)
+  node dpkit.mjs --syntax=… / --registry=… / --versions   Teach/offline modes
 
 Config: a .dpkit.json in the cwd or home dir sets your defaults (datapack / version /
-ignore / minecraftRoot / baselineFile); see .dpkit.example.json. Precedence for every
-value: CLI flag > env var (DPKIT_DATAPACK, DPKIT_VERSION, DPKIT_CONFIG) > .dpkit.json
-> built-in default.
+ignore / minecraftRoot / baselineFile / plugins); see .dpkit.example.json. Precedence for
+every value: CLI flag > env var (DPKIT_DATAPACK, DPKIT_VERSION, DPKIT_CONFIG) >
+.dpkit.json > built-in default.
 
 Options:
   --version=<v>    Game version to check as (default auto: reads the checked datapack's pack.mcmeta)
@@ -240,6 +261,7 @@ Options:
   --cache-miss=download|fallback|fail   Missing per-version cache policy (default download)
   --no-false-positives   Disable the built-in known-false-positive rule database
   --check-workspace      Also run a full, separate check for every --workspace datapack
+  --plugin=<path>  Load a dpkit plugin module (.mjs/.js; repeatable; also settable in .dpkit.json)
   --watch          Re-check on file changes (directory datapacks only; incremental: changed files are re-analyzed; Ctrl-C to stop)
 
 Teach-the-AI modes (ground-truth syntax from the ${GAME_VERSION} command tree):
@@ -290,6 +312,13 @@ function warnUnrecognizedVersion(): void {
 export async function main(): Promise<void> {
   try {
     if (HELP) { printHelp(); return; }
+    if (PLUGIN_SPECS.length) {
+      try {
+        PLUGINS = await loadPluginModules(PLUGIN_SPECS, process.cwd());
+      } catch (err) {
+        throw new api.DpkitError((err as Error).message, api.EXIT_USAGE);
+      }
+    }
     if (CACHE_VERSIONS_GIVEN) { await runCacheVersions(); return; }
     warnUnrecognizedVersion();
     if (OFFLINE) { await runOffline(); return; }
@@ -551,6 +580,7 @@ async function runCheck(): Promise<void> {
     resourcePacks: resourceList,
     cacheMiss: CACHE_MISS as api.CacheMissPolicy,
     falsePositives: NO_FALSE_POSITIVES ? false : cfg.falsePositives,
+    plugins: PLUGINS,
     onLog: out,
   } satisfies Parameters<typeof api.checkDatapack>[0];
   const result = await api.checkDatapack(mainOptions);
@@ -652,6 +682,7 @@ async function runWatch(): Promise<void> {
     resourcePacks: [...(cfg.resourcePacks ?? []), ...RESOURCE_PACKS],
     cacheMiss: CACHE_MISS as api.CacheMissPolicy,
     falsePositives: NO_FALSE_POSITIVES ? false : cfg.falsePositives,
+    plugins: PLUGINS,
     onLog: out,
     ...extra,
   });

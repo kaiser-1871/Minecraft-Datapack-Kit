@@ -4,6 +4,13 @@
 
 ### Added
 
+- Plugin API (`src/plugins.ts`): plugins can run `setup` / `beforeCheck` / `afterCheck` around a
+  check; loadable from the API, `.dpkit.json` `plugins`, or `--plugin=<path>`. Design inspired by
+  [mcbeet/beet](https://github.com/mcbeet/beet)'s plugin/`Context` pipeline.
+- `dpkit init` subcommand: scaffolds `.dpkit.json` and an optional GitHub Actions workflow.
+- Test helpers (`dpkit-mc/testing`): `assertDatapackClean`, `assertDatapackSnapshot`,
+  `checkDatapackForTest`, `formatReport` for golden/snapshot testing.
+- `dpkit check` is now accepted as an explicit alias for the default checking command.
 - `auto` version resolution now prefers the release matching the base `pack.pack_format` when the
   declared `min_format`/`max_format` range contains that dpv (e.g. `94 + 88..9999999` → 1.21.11,
   not the newest in-range release).

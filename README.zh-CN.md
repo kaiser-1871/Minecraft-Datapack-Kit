@@ -94,6 +94,7 @@ dpkit-mc --datapack=你的数据包路径 --strict         # 有错误或警告�
 | `cacheMiss` | 缺少逐版本数据时的行为：`download`（默认）/ `fallback` / `fail` |
 | `falsePositives` | `false` 关闭全部规则；字符串数组启用其中一部分 |
 | `checkWorkspace` | 对每个工作区数据包额外运行一次完整独立检查 |
+| `plugins` | 插件模块路径数组（相对配置文件目录解析），如 `["./tools/my-plugin.mjs"]` |
 
 取值优先级：**CLI 参数 > 环境变量 > 配置文件 > 内置默认**。环境变量：`DPKIT_DATAPACK`、
 `DPKIT_VERSION`、`DPKIT_CONFIG`（CLI 与 MCP 都识别；空字符串视为未设置）。参考
@@ -146,6 +147,56 @@ jobs:
         with: { node-version: 22 }
       - run: npx --yes dpkit-mc --datapack=pack --version=26.2 --strict   # 退出码 1 阻止合并
 ```
+
+## 插件、初始化与测试助手（新）
+
+> 设计灵感来自 [mcbeet/beet](https://github.com/mcbeet/beet)——Minecraft 数据包/资源包开发工具包。
+> dpkit 借鉴了 Beet 的插件 / `Context` 管道、项目脚手架和测试优先的体验，同时保持自己作为检查器的定位。
+
+### `dpkit init` 脚手架
+
+```bash
+node dpkit.mjs init                    # 在当前目录生成 .dpkit.json + GitHub Actions
+node dpkit.mjs init --no-ci            # 只生成 .dpkit.json
+node dpkit.mjs init --dir=my-pack --version=1.21.4 --force
+```
+
+### 插件系统
+
+插件可以在检查前查看文件集合，在报告生成后追加/修改问题。支持从 API、`.dpkit.json`
+的 `plugins` 字段或 `--plugin=<path>` 加载：
+
+```js
+// tools/my-plugin.mjs
+export default {
+  name: 'my-rule',
+  afterCheck({ report }) {
+    // 直接 push 时记得同步 summary；或使用 addIssue 帮助函数
+    report.issues.push({ file: 'pack.mcmeta', line: 1, char: 0, severity: 'W', message: 'hello' });
+    report.summary.warnings++;
+  },
+};
+```
+
+```bash
+node dpkit.mjs --datapack=pack --plugin=./tools/my-plugin.mjs
+```
+
+### 测试助手（Node test / 任意断言库）
+
+```js
+import { assertDatapackClean, assertDatapackSnapshot } from 'dpkit-mc/testing';
+
+test('pack is clean', async () => {
+  await assertDatapackClean({ datapack: 'pack', version: '1.21.4' });
+});
+
+test('report matches golden snapshot', async () => {
+  await assertDatapackSnapshot({ datapack: 'pack', version: '1.21.4' });
+});
+```
+
+快照不匹配时可用 `DPKIT_UPDATE_SNAPSHOTS=1` 更新基线。
 
 ## 多包工作区与只读资源包（1.0 新增）
 

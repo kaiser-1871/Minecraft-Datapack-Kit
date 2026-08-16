@@ -29,11 +29,14 @@ import { planConcreteVersion, planVersionCheck } from './cache-policy.js';
 import type { CacheMissPolicy, VersionPlan } from './cache-policy.js';
 import { createInProcEngine, createInProcEnginePool } from './engine/inproc.js';
 import { loadCommandTree, loadCachedVersions, cachedCommandVersions, renderPath, renderAll, resolveConcreteVersion } from './syntax.js';
+import { initPlugins, runAfterCheck, runBeforeCheck } from './plugins.js';
+import type { DpkitPlugin, PluginContext } from './plugins.js';
 import type { BaselineEntry, CheckLog, CompletionItemDTO, GameLogReport, GotchaIssue, RawDiagnostic, ReportIssue, SyntaxResult } from './types.js';
 import type { CheckEngine, EngineCheckResult, EngineSnapshot } from './engine/types.js';
 
 export type { CheckEngine } from './engine/types.js';
 export type { CacheMissPolicy } from './cache-policy.js';
+export type { DpkitPlugin, PluginContext } from './plugins.js';
 
 export type EngineKind = 'inproc' | 'lsp' | 'pool';
 
@@ -85,6 +88,8 @@ export interface CheckOptions {
   cacheMiss?: CacheMissPolicy;
   /** Known-false-positive rule selection: false disables all, string[] enables a subset. */
   falsePositives?: boolean | string[];
+  /** Plugins to run around the check (see src/plugins.ts). */
+  plugins?: DpkitPlugin[];
   onLog?: (msg: string) => void;
 }
 
@@ -426,6 +431,23 @@ ${FILES_EMPTY_HINT}`,
     rels.push(e.rel || 'data/');
   }
 
+  // Plugin boundary: after file collection / version resolution, before the engine runs.
+  const pluginCtx: PluginContext = {
+    datapack: opts.datapack,
+    workRoot,
+    version: opts.version,
+    resolvedVersion: versionPlan?.actualVersion ?? autoDetected ?? null,
+    files,
+    rels,
+    opts,
+  };
+  try {
+    await initPlugins(opts.plugins ?? [], pluginCtx);
+    await runBeforeCheck(opts.plugins ?? [], pluginCtx);
+  } catch (err) {
+    throw new DpkitError(`[plugin] ${(err as Error).message}`, EXIT_USAGE);
+  }
+
   let engine: CheckEngine;
   let externalEngine = false;
   if (isEngineInstance(opts.engine)) {
@@ -452,7 +474,15 @@ ${FILES_EMPTY_HINT}`,
       if (includeMcmeta) {
         diagnosticsByRel.set(mcmetaRel, packMcmetaDiagnostics(mcmetaText, workRoot, resolvedVersion, true));
       }
-      return assembleReport(opts, files, rels, diagnosticsByRel, new Set(), resolvedVersion, null, null, texts, workRoot, false, auxPacks, versionPlan, autoDetected, includeMcmeta, skippedOverlayFiles, activeUnreadableDirs.length, unreadableFileDiags.size);
+      const result = assembleReport(opts, files, rels, diagnosticsByRel, new Set(), resolvedVersion, null, null, texts, workRoot, false, auxPacks, versionPlan, autoDetected, includeMcmeta, skippedOverlayFiles, activeUnreadableDirs.length, unreadableFileDiags.size);
+      try {
+        const report = await runAfterCheck(opts.plugins ?? [], pluginCtx, result.report);
+        const final = { ...result, report };
+        syncPluginLines(final);
+        return final;
+      } catch (err) {
+        throw new DpkitError(`[plugin] ${(err as Error).message}`, EXIT_USAGE);
+      }
     }
 
     let res: EngineCheckResult;
@@ -523,7 +553,15 @@ ${FILES_EMPTY_HINT}`,
     if (includeMcmeta) {
       diagnosticsByRel.set(mcmetaRel, packMcmetaDiagnostics(mcmetaText, workRoot, targetVersion, true));
     }
-    return assembleReport(opts, files, rels, diagnosticsByRel, res.failedRels, res.resolvedVersion ?? versionPlan?.actualVersion ?? null, macro, nbt, texts, workRoot, true, auxPacks, versionPlan, autoDetected, includeMcmeta, skippedOverlayFiles, activeUnreadableDirs.length, unreadableFileDiags.size);
+    const result = assembleReport(opts, files, rels, diagnosticsByRel, res.failedRels, res.resolvedVersion ?? versionPlan?.actualVersion ?? null, macro, nbt, texts, workRoot, true, auxPacks, versionPlan, autoDetected, includeMcmeta, skippedOverlayFiles, activeUnreadableDirs.length, unreadableFileDiags.size);
+    try {
+      const report = await runAfterCheck(opts.plugins ?? [], pluginCtx, result.report);
+      const final = { ...result, report };
+      syncPluginLines(final);
+      return final;
+    } catch (err) {
+      throw new DpkitError(`[plugin] ${(err as Error).message}`, EXIT_USAGE);
+    }
   } finally {
     if (!externalEngine) await engine.close();
     for (const aux of auxPacks) {
@@ -1139,6 +1177,30 @@ function assembleReport(
   return { report, lines, agg, ignoredAgg, newBaseline };
 }
 
+/**
+ * After plugins have run, `result.lines` may be stale (it was rendered from the pre-plugin
+ * report). Append any report issues that are not already represented so text-mode output shows
+ * plugin-added issues too. JSON output is always authoritative because it reads `report.issues`.
+ */
+function syncPluginLines(result: CheckResult): void {
+  const seen = new Set<string>();
+  for (const line of result.lines) {
+    const t = line.trim();
+    if (t.startsWith('[')) seen.add(t);
+  }
+  const missing: string[] = [];
+  for (const issue of result.report.issues) {
+    const t = `[${issue.severity}:${issue.line}:${issue.char}] ${issue.message}`;
+    if (!seen.has(t)) {
+      missing.push(`  ${t}   (${issue.file})`);
+      seen.add(t);
+    }
+  }
+  if (missing.length) {
+    result.lines.push('', '== plugin-added issues ==', ...missing);
+  }
+}
+
 // ---- complete ----------------------------------------------------------------
 export interface CompleteOptions {
   datapack: string;
@@ -1335,3 +1397,4 @@ export { detectDefaultDatapack } from './datapack-discovery.js';
 export { createLspEngine };
 export { createInProcEnginePool };
 export { checkEngineUpdates, loadEngineBuildInfo } from './update-check.js';
+export { addIssue, loadPluginModules } from './plugins.js';

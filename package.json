@@ -5,6 +5,16 @@
   "type": "module",
   "main": "dist/api.js",
   "types": "dist/api.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/api.d.ts",
+      "import": "./dist/api.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
+    }
+  },
   "bin": {
     "dpkit-mc": "dpkit.mjs",
     "dpkit-mcp": "dpkit-mcp.mjs"

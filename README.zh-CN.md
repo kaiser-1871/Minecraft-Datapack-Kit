@@ -1,4 +1,4 @@
-# dpkit — 随时随地检查数据包：CI、脚本与 AI
+# Minecraft Datapack Kit (dpkit) — 随时随地检查数据包：CI、脚本与 AI
 
 **[English](README.md) | 简体中文**
 
@@ -10,7 +10,8 @@
 > **欢迎大家在不同版本上测试并反馈问题！** 有问题请到
 > [Issues](https://github.com/kaiser-1871/MC-DPKIT/issues) 提交。
 
-**dpkit** 可以检查**任意** Minecraft 数据包，覆盖上游数据提供方支持的所有游戏版本
+**dpkit**（全称 **Minecraft Datapack Kit**，Minecraft 数据包工具包）可以检查**任意** Minecraft
+数据包，覆盖上游数据提供方支持的所有游戏版本
 （**1.14 至最新正式版/快照**），并且运行的是与
 [Datapack Helper Plus (Spyglass)](https://marketplace.visualstudio.com/items?itemName=spgoding.datapack-language-server)
 VS Code 扩展**完全相同的引擎**——该引擎已内置在本仓库中（见下文

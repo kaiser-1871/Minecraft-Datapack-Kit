@@ -1,4 +1,4 @@
-# dpkit — check datapacks anywhere: CI, scripts, and AI
+# Minecraft Datapack Kit (dpkit) — check datapacks anywhere: CI, scripts, and AI
 
 **English | [简体中文](README.zh-CN.md)**
 
@@ -11,8 +11,9 @@
 > feedback on other versions are very welcome! Please report issues at the
 > [issue tracker](https://github.com/kaiser-1871/MC-DPKIT/issues).
 
-**dpkit** checks **any** Minecraft datapack against every game version the upstream data provider
-covers (**1.14 through the latest release/snapshot**), running the **exact same engine** as the
+**dpkit** (short for **Minecraft Datapack Kit**) checks **any** Minecraft datapack against every
+game version the upstream data provider covers (**1.14 through the latest release/snapshot**),
+running the **exact same engine** as the
 [Datapack Helper Plus (Spyglass)](https://marketplace.visualstudio.com/items?itemName=spgoding.datapack-language-server)
 VS Code extension — the engine is vendored in this repo ([Built on Spyglass](#built-on-spyglass-the-datapack-helper-plus-engine)
 below), and diagnostics are verified identical by a parity gate (in-process engine vs LSP, per-file

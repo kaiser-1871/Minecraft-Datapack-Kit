@@ -1,7 +1,15 @@
 # dpkit — check datapacks anywhere: CI, scripts, and AI
 
+**English | [简体中文](README.zh-CN.md)**
+
 [![CI](https://github.com/kaiser-1871/MC-DPKIT/actions/workflows/ci.yml/badge.svg)](https://github.com/kaiser-1871/MC-DPKIT/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/dpkit-mc)](https://www.npmjs.com/package/dpkit-mc)
+
+> **⚠️ Testing status**: the author has personally tested dpkit only against their own datapack
+> for **Minecraft 26.2**. Other versions (1.14 through the latest) are supported via the upstream
+> per-version engine data but have **not** been exhaustively verified by the author — testing and
+> feedback on other versions are very welcome! Please report issues at the
+> [issue tracker](https://github.com/kaiser-1871/MC-DPKIT/issues).
 
 **dpkit** checks **any** Minecraft datapack against every game version the upstream data provider
 covers (**1.14 through the latest release/snapshot**), running the **exact same engine** as the

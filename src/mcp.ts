@@ -20,6 +20,7 @@ import { ensureVersionData } from './version-data.js';
 import { errResult, jsonResult, ok, truncate } from './mcp-shape.js';
 import { registerWorkflowPrompt } from './prompt-workflow.js';
 import { readGameLogs } from './logreader.js';
+import { McpLogTail } from './mcp-logs.js';
 import { ensureBlockStates, getBlockStates, listBlockStates } from './block-states.js';
 import { ensureVanillaData, getVanillaFile, searchVanillaFiles, VANILLA_CATEGORIES } from './vanilla-data.js';
 import { CommandDataNotCachedError } from './syntax.js';
@@ -33,6 +34,9 @@ export async function main(): Promise<void> {
   // 'inproc'/'lsp' string still builds a one-shot engine.
   const pooledEngine = api.createInProcEnginePool();
   const pickEngine = (e?: 'inproc' | 'lsp' | 'pool') => (e === 'inproc' || e === 'lsp' ? e : pooledEngine);
+
+  // Process-wide cursor log tail shared by read_logs and wait_for_log (MCP-rogal pattern).
+  const logTail = new McpLogTail(5000);
 
   // Empty-string env vars mean "unset" (same rule as the CLI): '' must not beat the config.
   const defaultDatapack = (version: string): string =>
@@ -297,7 +301,9 @@ export async function main(): Promise<void> {
     inputSchema: {
       registry: z.string().describe('Registry name, e.g. mob_effect, attribute, damage_type (namespaced form also accepted).'),
       version: z.string().optional().describe('Game version. Defaults to config / $DPKIT_VERSION.'),
-      search: z.string().optional().describe('Case-insensitive substring filter applied to the FULL registry before truncation.'),
+      search: z.string().optional().describe('Case-insensitive substring filter applied to the FULL registry before paging.'),
+      offset: z.number().int().min(0).optional().describe('How many matching values to skip, for paging (default 0).'),
+      limit: z.number().int().min(1).max(5000).optional().describe('Maximum values to return (default 200).'),
     },
   }, async (args) => {
     try {
@@ -309,17 +315,23 @@ export async function main(): Promise<void> {
       const search = args.search?.trim().toLowerCase();
       const full = r.values ?? [];
       const filtered = search ? full.filter(v => v.toLowerCase().includes(search)) : full;
-      const t = truncate(filtered, 200, 'pass search= to filter the full registry before truncation');
+      const offset = Math.max(0, args.offset ?? 0);
+      const limit = Math.min(Math.max(1, args.limit ?? 200), 5000);
+      const page = filtered.slice(offset, offset + limit);
+      const hasMore = offset + page.length < filtered.length;
       return jsonResult(ok({
         name: r.name,
         version: r.version,
         found: r.found,
         cached: r.cached,
-        values: t.items,
+        values: page,
         count: full.length,
-        total: t.total,
-        truncated: t.truncated,
-        ...(t.hint ? { hint: t.hint } : {}),
+        total: filtered.length,
+        offset,
+        limit,
+        nextOffset: hasMore ? offset + page.length : undefined,
+        truncated: hasMore,
+        ...(hasMore ? { hint: 'pass offset= to page further (e.g. offset=' + (offset + page.length) + ')' } : {}),
       }));
     } catch (e) {
       return errResult(e);
@@ -337,6 +349,24 @@ export async function main(): Promise<void> {
     try {
       const v = await api.listVersions(ver(args.configured));
       return jsonResult(ok(v));
+    } catch (e) {
+      return errResult(e);
+    }
+  });
+
+  server.registerTool('get_pack_meta', {
+    description:
+      'Return the pack.mcmeta format facts a datapack author needs for a version: data_pack_version / pack_format, ' +
+      'resource_pack_version, and a ready-to-paste pack.mcmeta example. A wrong pack_format makes the game reject the ' +
+      'pack with a vague "Error reading pack metadata" while every function inside it silently does nothing — check this ' +
+      'before writing a new datapack.',
+    inputSchema: {
+      version: z.string().optional().describe('Game version. Defaults to config / $DPKIT_VERSION.'),
+    },
+  }, async (args) => {
+    try {
+      const r = await api.getPackMeta(ver(args.version));
+      return jsonResult(ok(r));
     } catch (e) {
       return errResult(e);
     }
@@ -374,25 +404,75 @@ export async function main(): Promise<void> {
   server.registerTool('read_logs', {
     description:
       'Diagnose runtime problems: auto-detect the official / Prism / TLauncher launcher latest.log (including rotated ' +
-      '.log.gz logs) and return the tail content. Point minecraftRoot= at a Minecraft install base dir to override the ' +
-      'default launcher location (defaults to the config minecraftRoot).',
+      '.log.gz logs) and return the tail content. Cursor-based: every line has an id; the response carries nextId, ' +
+      'pass it back as since_id to receive only what arrived since. Point minecraftRoot= at a Minecraft install base dir ' +
+      'to override the default launcher location (defaults to the config minecraftRoot).',
     inputSchema: {
       launcher: z.enum(['default', 'prism', 'tlauncher']).optional().describe('Launcher to read from. Omit to auto-detect (prism → default → tlauncher).'),
       instance: z.string().optional().describe('Prism instance name (only meaningful with Prism Launcher).'),
-      lines: z.number().int().min(1).max(1000).optional().describe('Lines per file. Default 100.'),
+      lines: z.number().int().min(1).max(1000).optional().describe('Lines per file in the legacy logs[] content. Default 100.'),
       tail: z.boolean().optional().describe('Return the last N lines (default true) or the first N (false).'),
+      since_id: z.number().int().min(0).optional().describe('Return buffered entries with id >= this; use nextId from a previous read.'),
+      limit: z.number().int().min(1).max(2000).optional().describe('Maximum cursor entries to return. Default 100.'),
       minecraftRoot: z.string().optional().describe('Override base dir; defaults to config minecraftRoot.'),
     },
   }, async (args) => {
     try {
-      const r = readGameLogs({
+      const opts = {
         launcher: args.launcher,
         instance: args.instance,
         lines: args.lines,
         tail: args.tail,
         minecraftRoot: args.minecraftRoot ?? cfg.minecraftRoot,
+      };
+      const r = readGameLogs(opts);
+      logTail.refresh(opts);
+      const q = logTail.query({
+        sinceId: args.since_id,
+        limit: args.limit ?? args.lines ?? 100,
       });
-      return jsonResult(ok(r));
+      return jsonResult(ok({
+        ...r,
+        entries: q.entries,
+        nextId: q.nextId,
+        missed: q.missed,
+        droppedTotal: q.droppedTotal,
+        bufferedEntries: q.buffered,
+        ...(q.warning ? { warning: q.warning } : {}),
+      }));
+    } catch (e) {
+      return errResult(e);
+    }
+  });
+
+  server.registerTool('wait_for_log', {
+    description:
+      'Block until a log line matching a pattern appears, or the timeout elapses. This is the live half of log access: ' +
+      'trigger something (for example a datapack reload in the game), then wait for the line that tells you whether it ' +
+      'worked, instead of polling read_logs. Entries already buffered at or after since_id are checked before waiting, so ' +
+      'a line that landed between your last read and this call is not missed.',
+    inputSchema: {
+      pattern: z.string().describe('Case-insensitive regular expression to wait for, matched against the log line text.'),
+      timeout_ms: z.number().int().min(100).max(60000).optional().describe('How long to wait before giving up. Default 15000.'),
+      since_id: z.number().int().min(0).optional().describe('Start looking from this entry id; use nextId from read_logs.'),
+      launcher: z.enum(['default', 'prism', 'tlauncher']).optional().describe('Launcher to read from. Omit to auto-detect (prism → default → tlauncher).'),
+      instance: z.string().optional().describe('Prism instance name (only meaningful with Prism Launcher).'),
+      minecraftRoot: z.string().optional().describe('Override base dir; defaults to config minecraftRoot.'),
+    },
+  }, async (args) => {
+    try {
+      const timeoutMs = Math.min(Math.max(args.timeout_ms ?? 15000, 100), 60000);
+      const res = await logTail.waitFor(
+        {
+          launcher: args.launcher,
+          instance: args.instance,
+          minecraftRoot: args.minecraftRoot ?? cfg.minecraftRoot,
+        },
+        args.pattern,
+        timeoutMs,
+        args.since_id ?? 0,
+      );
+      return jsonResult(ok(res));
     } catch (e) {
       return errResult(e);
     }
@@ -435,6 +515,11 @@ export async function main(): Promise<void> {
         });
       }
       const id = args.block.startsWith('minecraft:') ? args.block.slice('minecraft:'.length) : args.block;
+      const propNames = Object.keys(entry.properties);
+      const exampleParts = Object.entries(entry.defaults).map(([k, v]) => `${k}=${v}`);
+      const example = propNames.length > 0
+        ? `setblock ~ ~ ~ ${id}[${exampleParts.join(',')}]`
+        : `setblock ~ ~ ~ ${id}`;
       return jsonResult({
         ok: true,
         version,
@@ -442,6 +527,13 @@ export async function main(): Promise<void> {
         found: true,
         properties: entry.properties,
         defaults: entry.defaults,
+        possibleStates: propNames.length === 0
+          ? 1
+          : propNames.reduce((acc, k) => acc * (entry.properties[k]?.length ?? 1), 1),
+        example,
+        ...(entry.properties.half
+          ? { hint: "Blocks with a 'half' property occupy two positions. Place both parts, or the block breaks immediately." }
+          : {}),
       });
     } catch (e) {
       if (e instanceof CommandDataNotCachedError) {

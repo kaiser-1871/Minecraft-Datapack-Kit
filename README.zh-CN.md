@@ -5,7 +5,17 @@
 [![CI](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/actions/workflows/ci.yml/badge.svg)](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/dpkit-mc)](https://www.npmjs.com/package/dpkit-mc)
 
-> **⚠️ 测试状态**：作者本人仅在自己的 **Minecraft 26.2** 版本数据包上实际测试过 dpkit。
+> **✅ 测试状态（已扩展）**：作者本人除了自己的 **Minecraft 26.2** 数据包外，还在几个
+> **之前版本、且在游戏中正常运行过的地图数据包**上实测过 dpkit：
+>
+> - **1.16.5**：一个大型 CTM 地图数据包（约 8.4k 个文件）。修复 Windows 路径含 `+`
+>   导致整包被误报为 internal failure 的问题，并过滤 entity-NBT / 宽松 NBT / 行尾空格误报后，
+>   检查能以 0 internal failure 完成，剩余问题量小到可以人工审阅。
+> - **1.21.1 / 1.21.4 / 1.21.6**：多个 Roguelike/PVE 数据包：0 error；剩余 warning 主要是
+>   跨包未声明符号（objective / tag / sound）。
+> - **1.21.8 / 1.21.10 / 26.1.2**：多个 PVP 数据包：其中多个包完全干净（0 error、0 warning）；
+>   其余只剩余跨包/mod 提供符号类 warning。
+>
 > 其他版本（1.14 ~ 最新）依赖上游引擎的逐版本数据，未经作者逐一实测。
 > 项目里**大部分功能，尤其是每次新版本/新功能的更新，都是靠 AI 缝缝补补完成的**，
 > 可能存在未实测的边界情况。**请在使用前自行验证结果，不要直接把它当作生产/CI 的绝对权威。**
@@ -209,8 +219,10 @@ test('report matches golden snapshot', async () => {
 `--workspace=<目录或zip>[,<目录或zip>...]` / `--additional-datapacks=…` 让被检查的数据包
 **看到**其他数据包声明的符号，**但不检查那些包**。解析优先级：**当前数据包 > 工作区数据包 >
 原版**。每个解析到的符号都会在报告中列出：
-`resolved from workspace datapack <路径> (symbol provider only, not checked)`。没有工作区时，
-跨包缺失的函数/进度/谓词等会变成**范围提示**（不是错误/警告）：
+`resolved from workspace datapack <路径> (symbol provider only, not checked)`。工作区提供者现在
+覆盖函数、标签、进度、战利品表、谓词、物品修饰器、配方、声音事件、字体、翻译键，以及
+**计分板目标、队伍、结构**。没有工作区时，跨包缺失的函数/进度/谓词/计分板目标/队伍/结构等
+会变成**范围提示**（不是错误/警告）：
 `Cannot find function animated_java:* — pass --workspace=… if another pack declares it`。
 
 `--check-workspace` 会对每个工作区数据包额外运行一次完整的独立检查（默认关闭；工作区包

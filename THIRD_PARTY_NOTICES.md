@@ -39,6 +39,13 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## tar-stream and streaming helpers
+
+dpkit's build-time safe tar extractor (`scripts/safe-decompress.mjs`) bundles
+[`tar-stream`](https://github.com/mafintosh/tar-stream) (MIT) and its streaming
+helpers `streamx` (MIT), `b4a` (Apache-2.0), `fast-fifo` (MIT), and
+`text-decoder` (Apache-2.0).
+
 ## Spyglass engine (`@spyglassmc/*`)
 
 The vendored Spyglass packages are MIT-licensed; see `vendor/spyglass/LICENSE`

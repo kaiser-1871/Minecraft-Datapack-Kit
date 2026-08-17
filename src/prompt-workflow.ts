@@ -14,6 +14,7 @@ You are checking or authoring a Minecraft datapack with dpkit. Work version-firs
    explicitly when it matters. A pack with min_format / max_format AND a base pack_format prefers the
    matching release when that dpv is inside the range; range-only packs still resolve to the newest
    in-range release — pin --version= (or the config's "version") when that is not the intended target.
+   When starting a fresh pack, call get_pack_meta to get the exact pack_format and a pack.mcmeta example.
 
 2. Check ground-truth syntax before writing or fixing any command.
    Call query_syntax with the command path (e.g. "execute on" or "damage") and the target version.
@@ -36,7 +37,8 @@ You are checking or authoring a Minecraft datapack with dpkit. Work version-firs
 
 6. Diagnose runtime problems with the game log.
    If the datapack runs but misbehaves, use read_logs to tail the active launcher's latest.log (official
-   / Prism / TLauncher, including rotated .log.gz files).
+   / Prism / TLauncher, including rotated .log.gz files). After triggering a reload or command in-game,
+   use wait_for_log with a pattern like "Failed to load|Couldn't load" instead of polling read_logs.
 
 Rules of thumb: prefer query_syntax over memory for grammar; prefer list_registry over memory for IDs;
 and always finish with a clean check_datapack. All tools are version-aware — pass the resolved target

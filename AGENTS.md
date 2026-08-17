@@ -17,7 +17,8 @@ compiled to `dist/`. The root `dpkit.mjs` is a shim; `node dpkit.mjs` usage is u
 in-process engine (drives `@spyglassmc/core`'s `Project` directly, no subprocess);
 `--engine=lsp` keeps the old LSP-subprocess path for parity. There is also an MCP server
 (`npm run mcp`, tools check_datapack / query_syntax / complete_at / list_registry / list_versions /
-scan_gotchas / read_logs / get_vanilla_data / get_block_states, plus a `dpkit-workflow` prompt) and
+scan_gotchas / read_logs / wait_for_log / get_vanilla_data / get_block_states / get_pack_meta,
+plus a `dpkit-workflow` prompt) and
 a typed API (`dist/api.d.ts`). MCP tool results are enveloped: success adds `ok:true` (and
 `count`/`total`), errors keep the legacy `{error}` + `isError:true` and add `ok:false`; large arrays
 are truncated with `total`/`truncated`/`hint` (helpers live in `src/mcp-shape.ts`).
@@ -198,7 +199,7 @@ and the report header prints where the datapack came from (`from --datapack` / `
   or use `--complete-inline="<command>"`.
 - Game-log self-check (`src/logcheck.ts`) now delegates discovery/reading to
   `src/logreader.ts` (official / Prism / TLauncher, rotated `.log.gz`), like MCP `read_logs`.
-- `--watch` is incremental: plain file edits re-parse/bind/check only the changed files in the
-  pooled engine (mtime diffing drives `engine.updateFile()`), then re-render the report from the
-  engine's live diagnostics snapshot; file additions/removals or a pack.mcmeta change rebuild the
-  engine and re-analyze the whole pack. Unchanged files keep their previous diagnostics until then.
+- `--watch` polls for file changes (cross-platform; recursive `fs.watch` is unsupported on Linux).
+  Any same-set edit triggers a full re-analysis through the pooled engine, so cross-file
+  diagnostics (tags, functions, loot tables) stay correct; file additions/removals or a
+  pack.mcmeta change rebuild the engine and re-analyze the whole pack.

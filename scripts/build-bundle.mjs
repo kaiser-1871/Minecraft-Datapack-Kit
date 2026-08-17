@@ -76,6 +76,21 @@ function spyglassExternal(map) {
   };
 }
 
+// Replace the vulnerable `decompress` package (zip-slip, GHSA-mp2f-45pm-3cg9) with a safe,
+// in-memory tar extractor. Spyglass core only uses `decompress` for `decompressBall` on
+// upstream tarballs; our replacement keeps that API (`(buffer, { strip }) => Promise<File[]>`)
+// but rejects unsafe entry paths and does not write to the filesystem.
+function safeDecompress() {
+  return {
+    name: 'safe-decompress',
+    setup(b) {
+      b.onResolve({ filter: /^decompress$/ }, () => ({
+        path: join(root, 'scripts', 'safe-decompress.mjs'),
+      }));
+    },
+  };
+}
+
 const base = {
   absWorkingDir: root,
   bundle: true,
@@ -103,7 +118,7 @@ async function bundleSpyglassFacade(outName, contents, externalMap) {
     outfile: `dist/${outName}.js`,
     splitting: false,
     banner: { js: requireShim },
-    plugins: [stubMissingVersionsJson, spyglassExternal(externalMap)],
+    plugins: [stubMissingVersionsJson, spyglassExternal(externalMap), safeDecompress()],
   });
 }
 
@@ -136,7 +151,7 @@ async function main() {
       '@spyglassmc/core/lib/nodejs.js': './spyglass-core.js',
       '@spyglassmc/java-edition': './spyglass-java-edition.js',
       '@spyglassmc/mcdoc': './spyglass-mcdoc.js',
-    })],
+    }), safeDecompress()],
   });
 
   // Phase B — the dpkit modules (per-module dist/*.js, shared chunks split out).

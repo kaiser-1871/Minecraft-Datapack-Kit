@@ -38,6 +38,14 @@ upstream checkout, re-apply them first (see CLAUDE.md in the repo root for the s
    on Node 20 CI runs). Replaced with the equivalent ES2020 form:
    `[...oldExclude].every(v => newExclude.has(v))`.
 
+## dpkit-side build patch (not baked into the checkout)
+
+`packages/core/package.json` still lists `decompress` upstream, but dpkit does **not** install
+or bundle it: dpkit removes `decompress` / `@types/decompress` from `vendor/spyglass/core/package.json`
+and `scripts/build-bundle.mjs` aliases the `decompress` import to `scripts/safe-decompress.mjs`
+(a safe in-memory tar extractor). This avoids the known zip-slip CVEs in `decompress@4.2.1`.
+If you re-vendor from a fresh checkout, re-apply this package.json edit and keep the esbuild alias.
+
 ## Updating the vendored engine
 
 `npm run vendor -- --spyglass=<path-to-checkout>` rebuilds the checkout and re-syncs this

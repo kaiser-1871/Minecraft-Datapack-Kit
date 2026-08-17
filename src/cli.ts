@@ -5,7 +5,7 @@
 // vars, so the tool works for ANY datapack/version out of the box. Precedence per value:
 //   CLI flag  >  env var (DPKIT_DATAPACK / DPKIT_VERSION / DPKIT_CONFIG)
 //             >  .dpkit.json  >  built-in default
-import { existsSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -189,7 +189,6 @@ if (!['download', 'fallback', 'fail'].includes(CACHE_MISS)) {
 const NO_FALSE_POSITIVES = V['no-false-positives'] === true;
 const CHECK_WORKSPACE = V['check-workspace'] === true || cfg.checkWorkspace === true;
 const PLUGIN_SPECS = [...(cfg.plugins ?? []), ...(V.plugin ?? [])];
-let PLUGINS: DpkitPlugin[] = [];
 
 // ---- "teach AI to write" modes ----
 const SYNTAX = V.syntax ?? '';                  // offline: render grammar of a command path
@@ -286,7 +285,7 @@ Options:
   --suggestions     Also emit non-authoritative suggestions (only when confidence >= 0.9 and version data is full)
   --report=<file>   Write the JSON report to <file> (default dpkit_pvp_report.json)
   --no-write-report Disable writing the report file (--write-report is default)
-  --watch          Re-check on file changes (directory datapacks only; incremental: changed files are re-analyzed; Ctrl-C to stop)
+  --watch          Re-check on file changes (directory datapacks only; any change re-analyzes the pack; Ctrl-C to stop)
 
 Teach-the-AI modes (ground-truth syntax from the ${GAME_VERSION} command tree):
   --syntax=<path>  Print readable grammar of a command path, e.g. 'execute on'
@@ -336,13 +335,6 @@ function warnUnrecognizedVersion(): void {
 export async function main(): Promise<void> {
   try {
     if (HELP) { printHelp(); return; }
-    if (PLUGIN_SPECS.length) {
-      try {
-        PLUGINS = await loadPluginModules(PLUGIN_SPECS, process.cwd());
-      } catch (err) {
-        throw new api.DpkitError((err as Error).message, api.EXIT_USAGE);
-      }
-    }
     if (CACHE_VERSIONS_GIVEN) { await runCacheVersions(); return; }
     warnUnrecognizedVersion();
     if (OFFLINE) { await runOffline(); return; }
@@ -647,6 +639,11 @@ async function runCheckMacro(): Promise<void> {
 async function runCheck(): Promise<void> {
   const workspaceList = [...(cfg.workspace ?? []), ...WORKSPACE, ...(cfg.additionalDatapacks ?? []), ...ADDITIONAL_DATAPACKS];
   const resourceList = [...(cfg.resourcePacks ?? []), ...RESOURCE_PACKS];
+  // Plugins are loaded lazily for check/watch only, not for offline/teach commands, so a
+  // repository's .dpkit.json cannot execute code when you merely run --syntax/--registry/etc.
+  const plugins: DpkitPlugin[] = PLUGIN_SPECS.length
+    ? await loadPluginModules(PLUGIN_SPECS, process.cwd())
+    : [];
   const mainOptions = {
     datapack: requireDatapack(),
     version: GAME_VERSION,
@@ -667,7 +664,7 @@ async function runCheck(): Promise<void> {
     resourcePacks: resourceList,
     cacheMiss: CACHE_MISS as api.CacheMissPolicy,
     falsePositives: NO_FALSE_POSITIVES ? false : cfg.falsePositives,
-    plugins: PLUGINS,
+    plugins,
     rules: api.parseRuleList(RULES),
     suggestions: SUGGESTIONS,
     onLog: out,
@@ -730,9 +727,10 @@ async function runCheck(): Promise<void> {
   }
 }
 
-/** Watch mode: re-check on file changes. Uses a pooled engine so re-checks are fast; plain
- * file edits are incremental (only the changed files are re-parsed/bound/checked in the engine,
- * then the report is re-rendered from the engine's live diagnostics), while file additions /
+/** Watch mode: re-check on file changes. Uses a pooled engine so re-checks are fast. Any
+ * same-set edit triggers a full re-analysis through the pooled engine (not just the changed
+ * file), because a file edit can affect cross-file references (tags, functions, loot tables)
+ * and a per-file snapshot would leave stale diagnostics on dependents. File additions /
  * removals / pack.mcmeta changes rebuild the engine and re-analyze the whole pack. */
 async function runWatch(): Promise<void> {
   if (JSON_OUT) throw new api.DpkitError('[check] --watch does not support --json (interactive text output only)', api.EXIT_USAGE);
@@ -742,11 +740,14 @@ async function runWatch(): Promise<void> {
   }
   let pooledEngine = api.createInProcEnginePool();
   const MCMETA = join(datapack, 'pack.mcmeta');
-  /** The file set + mtimes as of the last check (drives incremental updates). */
+  /** The file set + mtimes as of the last check (drives change detection). */
   let known = new Map<string, number>();
   let first = true;
+  // Plugins are loaded lazily for check/watch only, not for offline/teach commands.
+  const plugins: DpkitPlugin[] = PLUGIN_SPECS.length
+    ? await loadPluginModules(PLUGIN_SPECS, process.cwd())
+    : [];
 
-  let timer: NodeJS.Timeout | null = null;
   let running = false;
   let pending = false;
 
@@ -779,7 +780,7 @@ async function runWatch(): Promise<void> {
     resourcePacks: [...(cfg.resourcePacks ?? []), ...RESOURCE_PACKS],
     cacheMiss: CACHE_MISS as api.CacheMissPolicy,
     falsePositives: NO_FALSE_POSITIVES ? false : cfg.falsePositives,
-    plugins: PLUGINS,
+    plugins,
     rules: api.parseRuleList(RULES),
     suggestions: SUGGESTIONS,
     onLog: out,
@@ -799,13 +800,14 @@ async function runWatch(): Promise<void> {
     if (running) { pending = true; return; }
     running = true;
     try {
+      const now = snapshotFiles();
       if (first) {
         first = false;
         const result = await api.checkDatapack(checkOptions({}));
-        known = snapshotFiles();
+        known = now;
         render(result);
       } else {
-        const now = snapshotFiles();
+
         const sameSet = now.size === known.size && [...now.keys()].every(k => known.has(k));
         const mcmetaChanged = (now.get(MCMETA) ?? 0) !== (known.get(MCMETA) ?? 0);
         if (!sameSet || mcmetaChanged) {
@@ -816,28 +818,20 @@ async function runWatch(): Promise<void> {
           known = now;
           render(result);
         } else {
-          // Incremental: refresh only the files whose mtime moved.
-          const changed: string[] = [];
-          for (const [f, mtime] of now) {
-            if (f === MCMETA) continue;
+          const changed = [...now].some(([f, mtime]) => {
+            if (f === MCMETA) return false;
             const prev = known.get(f);
-            if (prev !== undefined && prev !== mtime) changed.push(f);
+            return prev !== undefined && prev !== mtime;
+          });
+          if (changed) {
+            // Full re-analysis through the pooled engine (not a per-file incremental snapshot),
+            // so cross-file diagnostics stay correct.
+            const result = await api.checkDatapack(checkOptions({}));
+            known = now;
+            render(result);
+          } else {
+            known = now;
           }
-          if (changed.length && pooledEngine.updateFile) {
-            const { files, rels } = api.collectFiles(datapack, ONLY, overlayDirsOf(datapack));
-            const relOf = new Map<string, string>(files.map((f, i) => [f, rels[i]]));
-            for (const f of changed) {
-              const rel = relOf.get(f);
-              if (!rel) continue;
-              let text = '';
-              try { text = readFileSync(f, 'utf8'); } catch { continue; }
-              await pooledEngine.updateFile({ rel, file: f, text });
-            }
-          }
-          known = now;
-          const snap = pooledEngine.snapshot?.();
-          const result = await api.checkDatapack(checkOptions({ engineSnapshot: snap }));
-          render(result);
         }
       }
     } catch (err) {
@@ -850,15 +844,19 @@ async function runWatch(): Promise<void> {
 
   await check();
 
-  const watcher = watch(datapack, { recursive: true }, () => {
-    // debounce: coalesce rapid bursts of fs events into one re-check (mtime diffing above
-    // decides between an incremental refresh and a full rebuild, so event types don't matter)
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => { timer = null; void check(); }, 150);
-  });
+  // Poll instead of fs.watch({ recursive: true }): recursive watching is unsupported on Linux
+  // and a manual recursive watcher is overkill. Polling every 500ms is cross-platform and cheap
+  // because check() only re-runs when snapshotFiles() actually changed.
+  const pollTimer = setInterval(() => {
+    if (running) return;
+    const now = snapshotFiles();
+    const changed = now.size !== known.size ||
+      [...now.keys()].some(k => !known.has(k) || known.get(k) !== now.get(k));
+    if (changed) void check();
+  }, 500);
 
   const shutdown = async (): Promise<void> => {
-    watcher.close();
+    clearInterval(pollTimer);
     await pooledEngine.close();
     process.exit(0);
   };

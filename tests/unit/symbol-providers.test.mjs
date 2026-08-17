@@ -54,6 +54,31 @@ test('resolveAuxSymbol honors current > workspace > resource order', async () =>
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('scanPackSymbols indexes objectives, teams, and structures from functions', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dpkit-sym2-'));
+  try {
+    write(dir, 'data/a/function/load.mcfunction', 'scoreboard objectives add kills dummy\nteam add red\n');
+    write(dir, 'data/a/structures/house.nbt', '');
+    const s = scanPackSymbols(dir, true);
+    assert.ok(s.objectives.has('kills'));
+    assert.ok(s.teams.has('red'));
+    assert.ok(s.structures.has('a:house'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('resolveAuxSymbol resolves objectives, teams, and structures from workspace', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dpkit-aux3-'));
+  try {
+    write(dir, 'data/a/function/load.mcfunction', 'scoreboard objectives add kills dummy\nteam add red\n');
+    write(dir, 'data/a/structures/house.nbt', '');
+    const ws = { kind: 'workspace', display: 'ws', root: dir, symbols: scanPackSymbols(dir, true), cleanup: () => {} };
+    assert.equal(resolveAuxSymbol('Cannot find objective "kills"', [ws])?.source, 'workspace');
+    assert.equal(resolveAuxSymbol('Cannot find team "red"', [ws])?.source, 'workspace');
+    assert.equal(resolveAuxSymbol('Cannot find structure "a:house"', [ws])?.source, 'workspace');
+    assert.equal(resolveAuxSymbol('Cannot find objective "missing"', [ws]), null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('prepareAuxPacks accepts comma lists and rejects missing paths', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dpkit-aux2-'));
   try {

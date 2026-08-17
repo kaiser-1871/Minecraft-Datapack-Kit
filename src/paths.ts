@@ -9,5 +9,7 @@ export const ROOT_DIR = fileURLToPath(new URL('../', import.meta.url));
 /** The Spyglass LSP server entry (used by the --engine=lsp fallback). */
 export const SERVER = join(ROOT_DIR, 'dist', 'spyglass-server.js');
 
-/** Baseline file for --delta. */
-export const BASELINE_FILE = join(ROOT_DIR, '.dpkit-baseline.json');
+/** Baseline file for --delta. Defaults to the current working directory, not the package
+ * install root, so `npm i -g dpkit-mc` users can actually read/write it. Users can still
+ * override with --baseline or config `baselineFile`. */
+export const BASELINE_FILE = join(process.cwd(), '.dpkit-baseline.json');

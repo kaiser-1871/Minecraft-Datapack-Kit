@@ -39,6 +39,11 @@
   without a conservative validator as syntax-unchecked instead of silently consuming them.
 - New known false positive: Spyglass's "Expected at least one macro argument" for zero-variable
   `$` macro lines (valid in-game) is auto-filtered.
+- `--workspace` / `--additional-datapacks` now resolve **scoreboard objectives, teams, and
+  structures** declared in other datapacks (previously only functions/tags/advancements/loot
+  tables/predicates/item modifiers/recipes/sound events/fonts/translations were visible).
+  Missing cross-pack objectives/teams/structures also become scope hints instead of warnings when
+  no workspace is provided.
 - Entity-NBT scanning validates globally registry-bearing fields (e.g. `DeathLootTable`) even for
   custom/unknown entity types.
 - New known gotcha: `minecraft:ender_eye` item definitions adding `minecraft:consumable`
@@ -89,6 +94,32 @@
   unrelated project; published bins are `dpkit-mc` and `dpkit-mcp`).
 - `collectFiles` now returns overlay rels as `@overlay:<dir>/<data-rel>` and includes `.nbt`;
   callers that build rel maps from it see overlay files automatically.
+
+### Fixed
+
+- **In-process engine no longer reports clean files as internal failures.** `analyzeProject()`
+  emits `documentUpdated` for every file that parses/binds/checks successfully, including files
+  with zero diagnostics; dpkit now listens to it (one-shot and pooled engines) instead of treating
+  every file that never emitted `documentErrored` as a server failure.
+- **Paths containing `+` no longer break in-process checks on Windows.** `pathToFileURL` leaves
+  `+` unencoded while Spyglass's file walker percent-encodes it as `%2B`, so dpkit's uri→rel map
+  missed every event and reported whole packs as internal failures. All file URIs, project roots,
+  and event matching now use one canonical URI form.
+- **Entity-NBT: ambiguous `since==until` schema annotations are unchecked, never warned.** The
+  cached vanilla-mcdoc marks fields such as `Team` on many entity types as `since=until=26.3`,
+  which is a schema artifact; these positions are now treated as “cannot judge” instead of false
+  “added in 26.3” warnings.
+- **Entity-NBT: loot-table sentinels `none` / `empty` / `""` are no longer flagged.**
+  `DeathLootTable:"none"` and friends are long-standing “no loot table” sentinels Minecraft
+  accepts but the vanilla `loot_table` registry does not list.
+- **New known-false-positive rules** for lenient in-game behavior Spyglass rejects:
+  - `Rotation:[0f]`-style list-length diagnostics;
+  - NBT booleans written as `0`/`1` integers and NBT shorts written as plain integers
+    (e.g. `Amplifier:255`);
+  - trailing whitespace after a complete command making Spyglass expect an optional next argument
+    (`particle ... force `, `effect ... 0 `, `playsound ... 1 2 `, `schedule ... 2t `, `tp ... ~ `);
+  - `Cannot find loot_table "minecraft:none"/"minecraft:empty"`;
+  - text-component `"color": ""` being treated as a missing `#hex` color.
 
 All notable changes to this project are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to

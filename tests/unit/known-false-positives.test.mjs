@@ -27,3 +27,62 @@ test('zero-variable macro line diagnostic is a known false positive', () => {
   assert.equal(hit?.name, 'macro-line-no-arguments');
   assert.equal(matchKnownFalsePositive(d, { ...ctx, fileText: '$execute run say $(msg)\n' }, enabledKnownFpRules(undefined, true)), null);
 });
+
+test('lenient NBT forms are known false positives', () => {
+  const enabled = enabledKnownFpRules(undefined, true);
+  const rotation = matchKnownFalsePositive(
+    diag('Expected collection length to be at least 2 and at most 2'),
+    { version: '1.16.5', rel: 'a.mcfunction', fileText: 'summon armor_stand ~ ~ ~ {Rotation:[0f]}\n' },
+    enabled,
+  );
+  assert.equal(rotation?.name, 'nbt-rotation-list-length');
+
+  const boolCompound = matchKnownFalsePositive(
+    diag('Expected a boolean'),
+    { version: '1.16.5', rel: 'a.mcfunction', fileText: 'summon zombie ~ ~ ~ {NoAI:0}\n' },
+    enabled,
+  );
+  assert.equal(boolCompound?.name, 'nbt-int-for-boolean');
+
+  const boolData = matchKnownFalsePositive(
+    diag('Expected a boolean'),
+    { version: '1.16.5', rel: 'a.mcfunction', fileText: 'data modify entity @s NoAI set value 0\n' },
+    enabled,
+  );
+  assert.equal(boolData?.name, 'nbt-int-for-boolean');
+
+  const shortCompound = matchKnownFalsePositive(
+    diag('Expected a short'),
+    { version: '1.16.5', rel: 'a.mcfunction', fileText: 'summon tropical_fish ~ ~ ~ {Amplifier:255}\n' },
+    enabled,
+  );
+  assert.equal(shortCompound?.name, 'nbt-int-for-short');
+
+  const tpTrailing = matchKnownFalsePositive(
+    diag('Expected facing|<rotation: rotation>'),
+    { version: '1.16.5', rel: 'a.mcfunction', fileText: 'tp @s ~ ~0.6 ~ \n' },
+    enabled,
+  );
+  assert.equal(tpTrailing?.name, 'tp-trailing-whitespace-rotation');
+
+  const optionalTrailing = matchKnownFalsePositive(
+    diag('Expected <viewers: entity>'),
+    { version: '1.16.5', rel: 'a.mcfunction', fileText: 'particle end_rod ~ ~ ~ 0 0 0 0 0 force \n' },
+    enabled,
+  );
+  assert.equal(optionalTrailing?.name, 'trailing-whitespace-optional-argument');
+
+  const lootSentinel = matchKnownFalsePositive(
+    diag('Cannot find loot_table “minecraft:none” (rule: undeclaredSymbol)'),
+    { version: '1.16.5', rel: 'a.mcfunction', fileText: 'summon zombie ~ ~ ~ {DeathLootTable:"none"}\n' },
+    enabled,
+  );
+  assert.equal(lootSentinel?.name, 'loot-table-none-empty-sentinel');
+
+  const emptyColor = matchKnownFalsePositive(
+    diag('Expected “#”'),
+    { version: '1.16.5', rel: 'a.mcfunction', fileText: 'title @s title [{"translate":"x","color":""}]\n' },
+    enabled,
+  );
+  assert.equal(emptyColor?.name, 'text-component-empty-color');
+});

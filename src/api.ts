@@ -32,7 +32,7 @@ import { planConcreteVersion, planVersionCheck } from './cache-policy.js';
 import type { CacheMissPolicy, VersionPlan } from './cache-policy.js';
 import { versionCapability } from './version-profile.js';
 import { createInProcEngine, createInProcEnginePool } from './engine/inproc.js';
-import { loadCommandTree, loadCachedVersions, cachedCommandVersions, renderPath, renderAll, resolveConcreteVersion } from './syntax.js';
+import { CommandDataNotCachedError, loadCommandTree, loadCachedVersions, cachedCommandVersions, renderPath, renderAll, resolveConcreteVersion } from './syntax.js';
 import { initPlugins, runAfterCheck, runBeforeCheck } from './plugins.js';
 import type { DpkitPlugin, PluginContext } from './plugins.js';
 import type { BaselineEntry, CheckLog, CompletionItemDTO, GameLogReport, GotchaIssue, RawDiagnostic, ReportIssue, RuleReport, SyntaxResult } from './types.js';
@@ -258,6 +258,12 @@ export interface CommandCheckResult {
   version: string;
   version_profile: 'full' | 'partial' | 'none' | 'ambiguous';
   can_give_suggestions: boolean;
+  /** Character offset where the first single-line error was reported, if any. */
+  cursor?: number | null;
+  /** The command text up to `cursor` — what the parser had consumed before failing. */
+  parsedUpTo?: string | null;
+  /** Agent-facing hint about what to do with a failed command. */
+  hint?: string;
 }
 
 /** One expanded/checked macro line. */
@@ -300,6 +306,24 @@ export interface VersionListResult {
   recent: { id: string; type: string; dpv: number | undefined; hasData: boolean }[];
   /** Filtered results when query was given (the FULL match set, not a "recent 14"). */
   matches: { id: string; type: string; dpv: number | undefined; hasData: boolean }[];
+}
+
+/** Version → pack.mcmeta format facts (borrowed from MCP-rogal's get_world_info pattern). */
+export interface PackMetaResult {
+  /** The concrete version id the query resolved to. */
+  version: string;
+  /** The data-pack format (pack_format / dpv) this version expects. */
+  data_pack_version: number | null;
+  /** Resource-pack format, when the version list carries it. */
+  resource_pack_version?: number | null;
+  /** 'release' | 'snapshot' | undefined when unknown. */
+  type?: string | null;
+  /** Alias of data_pack_version for people who think in pack.mcmeta terms. */
+  pack_format: number | null;
+  /** A ready-to-paste pack.mcmeta for this version. */
+  pack_mcmeta_example: string;
+  /** Present when the version list did not have a data_pack_version. */
+  hint?: string;
 }
 
 interface McmetaVersion { id: string; name?: string; type?: string; data_pack_version?: number; resource_pack_version?: number }
@@ -1399,6 +1423,12 @@ export async function checkCommand(opts: CheckCommandOptions): Promise<CommandCh
   let suggestions = all.filter(d => d.severity === 'info' && d.suggestion);
   if (!capability.can_give_suggestions || opts.suggestions !== true) suggestions = [];
 
+  // MCP-rogal style "honest result": when a single command fails, report where parsing
+  // stopped and what was consumed before it, so an agent can fix the exact spot.
+  const firstError = errors.find(e => e.line === 1);
+  const cursor = firstError?.column ?? null;
+  const parsedUpTo = cursor != null ? command.slice(0, cursor) : null;
+
   return {
     command,
     valid: errors.length === 0,
@@ -1409,6 +1439,13 @@ export async function checkCommand(opts: CheckCommandOptions): Promise<CommandCh
     version: resolvedVersion ?? opts.version,
     version_profile: capability.profile,
     can_give_suggestions: capability.can_give_suggestions,
+    ...(errors.length > 0
+      ? {
+          cursor,
+          parsedUpTo,
+          hint: 'The command did not parse/validate. Use query_syntax to see the grammar at this command path, or complete_at for live completions.',
+        }
+      : {}),
   };
 }
 
@@ -1608,6 +1645,67 @@ export async function listVersions(configured: string, query?: string): Promise<
     isPinned,
     recent,
     matches,
+  };
+}
+
+/**
+ * Return the pack.mcmeta format facts a datapack author needs for a version.
+ * Borrowed from MCP-rogal's get_world_info: a wrong pack_format makes the game reject the
+ * pack with only a vague "Error reading pack metadata" while every function inside it
+ * silently does nothing.
+ */
+export async function getPackMeta(version: string): Promise<PackMetaResult> {
+  let list: unknown[] | null = loadCachedVersions();
+  if (!Array.isArray(list)) {
+    try {
+      const res = await fetch('https://api.spyglassmc.com/mcje/versions', { signal: AbortSignal.timeout(6000) });
+      if (res.ok) list = await res.json() as unknown[];
+    } catch { /* offline → fall back to cache below */ }
+  }
+
+  let concrete: string;
+  try {
+    concrete = resolveConcreteVersion(version);
+  } catch (e) {
+    // If the local cache had no version list but the online fetch just succeeded, resolve
+    // directly from the fetched list instead of failing.
+    if (Array.isArray(list) && list.length > 0) {
+      const entries = list as McmetaVersion[];
+      const pick = version === 'latest snapshot'
+        ? entries.find(v => v.type === 'snapshot') ?? entries[0]
+        : version === 'latest release' || version === 'auto'
+          ? entries.find(v => v.type === 'release') ?? entries[0]
+          : null;
+      if (pick?.id) {
+        concrete = pick.id;
+      } else {
+        throw new CommandDataNotCachedError(
+          `[dpkit] version '${version}' needs a concrete version, but no version data is cached locally. Run node dpkit.mjs online once to download it, or pin --version=<concrete-version>.`,
+        );
+      }
+    } else {
+      throw e;
+    }
+  }
+
+  const entries = (Array.isArray(list) ? list : []) as McmetaVersion[];
+  const entry = entries.find(v => v.id === concrete);
+  const dpv = entry?.data_pack_version ?? null;
+
+  return {
+    version: concrete,
+    data_pack_version: dpv,
+    resource_pack_version: entry?.resource_pack_version ?? null,
+    type: entry?.type ?? null,
+    pack_format: dpv,
+    pack_mcmeta_example: JSON.stringify(
+      { pack: { pack_format: dpv ?? 0, description: 'my datapack' } },
+      null,
+      2,
+    ),
+    ...(dpv == null
+      ? { hint: 'No data_pack_version found for this version in the version list.' }
+      : {}),
   };
 }
 

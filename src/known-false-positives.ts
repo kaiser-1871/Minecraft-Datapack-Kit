@@ -85,6 +85,50 @@ export const KNOWN_FP_RULES: KnownFpRule[] = [
     matches: (d, ctx) => /pack format 9999999|9999999 is newer/.test(d.message)
       && /"max_format"\s*:\s*9999999/.test(ctx.fileText ?? ''),
   },
+  {
+    name: 'nbt-rotation-list-length',
+    description: 'Rotation:[0f] etc. — Minecraft accepts a one-element Rotation list (and tolerates wrong lengths); Spyglass requires exactly 2',
+    matches: (d, ctx) => /Expected collection length to be at least 2 and at most 2/.test(d.message)
+      && /Rotation\s*:\s*\[/.test(lineText(ctx, d)),
+  },
+  {
+    name: 'nbt-int-for-boolean',
+    description: 'NBT boolean fields written as 0/1 integers — Minecraft accepts byte booleans without the b suffix',
+    matches: (d, ctx) => /Expected a boolean/.test(d.message)
+      && (/\{\s*[^}]*:\s*[01]\s*[,}]/.test(lineText(ctx, d))
+        || /data\s+modify\s+entity\s+\S+\s+\S+\s+set\s+value\s+[01]\b/.test(lineText(ctx, d))),
+  },
+  {
+    name: 'nbt-int-for-short',
+    description: 'NBT short fields written as plain integers — Minecraft accepts unsuffixed integers for short/byte fields',
+    matches: (d, ctx) => /Expected a short/.test(d.message)
+      && ( /:\s*-?\d+\s*[,}]/.test(lineText(ctx, d))
+        || /data\s+modify\s+entity\s+\S+\s+\S+\s+set\s+value\s+-?\d+\b/.test(lineText(ctx, d)) ),
+  },
+  {
+    name: 'tp-trailing-whitespace-rotation',
+    description: 'tp ... ~ <trailing space> — Minecraft ignores trailing whitespace; Spyglass treats it as a missing rotation/facing argument',
+    matches: (d, ctx) => /Expected facing\|<rotation: rotation>/.test(d.message)
+      && /\btp\b/.test(lineText(ctx, d))
+      && /\s$/.test(lineText(ctx, d)),
+  },
+  {
+    name: 'trailing-whitespace-optional-argument',
+    description: 'Trailing whitespace after a complete command makes Spyglass expect an optional next argument; Minecraft ignores trailing whitespace',
+    matches: (d, ctx) => /\s$/.test(lineText(ctx, d))
+      && /^Expected (?:<viewers: entity>|<hideParticles: bool>|force\|normal|append\|replace|<minVolume: float>|<delta: vec3>|<scale: double>|<facingAnchor: entity_anchor>|facing\|<rotation: rotation>)/.test(d.message),
+  },
+  {
+    name: 'loot-table-none-empty-sentinel',
+    description: 'DeathLootTable:"none"/"empty" (also resolved as minecraft:none/minecraft:empty) — Minecraft accepts these no-loot sentinels',
+    matches: (d, ctx) => /Cannot find loot_table “minecraft:(none|empty)”/.test(d.message),
+  },
+  {
+    name: 'text-component-empty-color',
+    description: 'Text component "color":"" — Minecraft treats an empty color as default; Spyglass expects a color name or #hex',
+    matches: (d, ctx) => /Expected “#”/.test(d.message)
+      && /"color"\s*:\s*""/.test(lineText(ctx, d)),
+  },
 ];
 
 /** Categories where a missing symbol may simply live in another datapack (--workspace). */
@@ -92,6 +136,7 @@ export const SCOPE_HINT_CATEGORIES = new Set([
   'function', 'tag/function', 'tag/advancement', 'tag/loot_table', 'tag/predicate',
   'tag/item_modifier', 'tag/recipe', 'advancement', 'loot_table', 'predicate',
   'item_modifier', 'recipe', 'sound_event',
+  'objective', 'team', 'structure',
 ]);
 
 /**

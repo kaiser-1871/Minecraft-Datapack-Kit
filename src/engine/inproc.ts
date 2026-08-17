@@ -36,13 +36,28 @@ function safeStringify(v: unknown): string {
   try { return JSON.stringify(v) ?? String(v); } catch { return String(v); }
 }
 
+/**
+ * Canonical file URI used by dpkit ↔ Spyglass. `pathToFileURL` leaves `+` unencoded, but
+ * Spyglass's file walker/`UriStore` percent-encodes each path segment with `encodeURIComponent`
+ * (so `+` becomes `%2B`). Without matching that encoding, files under a path containing `+`
+ * are analyzed by the engine but dpkit's uri→rel map misses their events and reports them as
+ * internal failures.
+ */
+function canonicalizeUri(uri: string): string {
+  return core.normalizeUri(uri).replace(/\+/g, '%2B');
+}
+
+function toSpyglassUri(filePath: string): string {
+  return canonicalizeUri(pathToFileURL(filePath).href);
+}
+
 function makeService(datapack: string, version: string, logger: core.Logger, noGotchas: boolean): core.Service {
   const cacheRoot = core.fileUtil.ensureEndingSlash(pathToFileURL(envPaths('spyglassmc').cache).toString());
   const externals = getNodeJsExternals({ cacheRoot, logger });
   // Normalize the project root (lowercases the Windows drive letter) so that
   // `isSubUriOf(watchedUri, root)` matches the URIs the watcher stores — the check in
   // analyzeProject() is case-sensitive (fileUtil.getRelativeUriFromBase).
-  const projectRoot = core.normalizeUri(core.fileUtil.ensureEndingSlash(pathToFileURL(datapack).href)) as core.RootUriString;
+  const projectRoot = core.fileUtil.ensureEndingSlash(toSpyglassUri(datapack)) as core.RootUriString;
   // Gotcha heuristics live in the engine now (java-edition linter); --no-gotchas disables the
   // rules at the config level so the engine never runs them.
   const env: Record<string, unknown> = { gameVersion: version, enableMcdocCaching: true };
@@ -87,13 +102,13 @@ export function createInProcEngine(): CheckEngine {
       const service = makeService(datapack, version, logger, opts.noGotchas === true);
 
       const uriToRel = new Map<string, string>();
-      for (let i = 0; i < files.length; i++) uriToRel.set(core.normalizeUri(pathToFileURL(files[i]).href), rels[i]);
+      for (let i = 0; i < files.length; i++) uriToRel.set(toSpyglassUri(files[i]), rels[i]);
 
       const diagnosticsByRel = new Map<string, RawDiagnostic[]>();
       const seen = new Set<string>();
 
       service.project.on('documentErrored', ({ errors, uri }) => {
-        const rel = uriToRel.get(core.normalizeUri(uri));
+        const rel = uriToRel.get(canonicalizeUri(uri));
         if (rel === undefined) return; // not part of the dpkit file set (pack.mcmeta, deps, …)
         seen.add(rel);
         diagnosticsByRel.set(rel, errors.map(e => ({
@@ -105,6 +120,16 @@ export function createInProcEngine(): CheckEngine {
             end: { line: e.posRange.end.line, character: e.posRange.end.character },
           },
         })));
+      });
+
+      // analyzeProject() emits `documentUpdated` for every file that was read/parsed/bound/checked
+      // successfully — including files with zero diagnostics. A clean file never emits
+      // `documentErrored`, so without this listener it would be misreported as an internal failure.
+      service.project.on('documentUpdated', ({ doc }) => {
+        const rel = uriToRel.get(canonicalizeUri(doc.uri));
+        if (rel === undefined) return; // not part of the dpkit file set (pack.mcmeta, deps, …)
+        seen.add(rel);
+        if (!diagnosticsByRel.has(rel)) diagnosticsByRel.set(rel, []);
       });
 
       try {
@@ -134,7 +159,7 @@ export function createInProcEngine(): CheckEngine {
       const { datapack, version, file, rel, line, column } = opts;
       const logger = new RecordingLogger();
       const service = makeService(datapack, version, logger, false);
-      const nUri = core.normalizeUri(pathToFileURL(file).href);
+      const nUri = toSpyglassUri(file);
       const languageId = file.endsWith('.mcfunction') ? 'mcfunction' : 'json';
       try {
         await service.project.init();
@@ -161,10 +186,10 @@ export function createInProcEngine(): CheckEngine {
       const { datapack, version, rel, text } = opts;
       const logger = new RecordingLogger();
       const service = makeService(datapack, version, logger, opts.noGotchas === true);
-      const nUri = core.normalizeUri(pathToFileURL(join(datapack, 'data', rel)).href);
+      const nUri = toSpyglassUri(join(datapack, 'data', rel));
       const diagnostics: RawDiagnostic[] = [];
       const onError = ({ errors, uri }: { errors: readonly { severity: number; message: string; posRange: { start: { line: number; character: number }; end: { line: number; character: number } } }[]; uri: string }): void => {
-        if (core.normalizeUri(uri) !== nUri) return;
+        if (canonicalizeUri(uri) !== nUri) return;
         diagnostics.push(...errors.map(e => ({
           severity: 4 - e.severity,
           message: e.message,
@@ -244,7 +269,7 @@ export function createInProcEnginePool(): CheckEngine {
     // One persistent listener per entry — it always writes into `entry.current` (which the
     // caller swaps out per check), so listeners never accumulate across checks.
     service.project.on('documentErrored', ({ errors, uri }) => {
-      const rel = entry.uriToRel.get(core.normalizeUri(uri));
+      const rel = entry.uriToRel.get(canonicalizeUri(uri));
       if (rel === undefined) return; // not part of the dpkit file set (pack.mcmeta, deps, …)
       entry.current.set(rel, errors.map(e => ({
         // Spyglass severity (Error=3 … Hint=0) → LSP severity (Error=1 … Hint=4).
@@ -255,6 +280,14 @@ export function createInProcEnginePool(): CheckEngine {
           end: { line: e.posRange.end.line, character: e.posRange.end.character },
         },
       })));
+    });
+
+    // Clean files emit `documentUpdated` but never `documentErrored`; record them as checked with
+    // zero diagnostics so the pooled engine doesn't report them as internal failures.
+    service.project.on('documentUpdated', ({ doc }) => {
+      const rel = entry.uriToRel.get(canonicalizeUri(doc.uri));
+      if (rel === undefined) return; // not part of the dpkit file set (pack.mcmeta, deps, …)
+      if (!entry.current.has(rel)) entry.current.set(rel, []);
     });
 
     try {
@@ -284,7 +317,7 @@ export function createInProcEnginePool(): CheckEngine {
       // from under each other's documentErrored listener.
       return enqueue(entry, async () => {
         const uriToRel = new Map<string, string>();
-        for (let i = 0; i < files.length; i++) uriToRel.set(core.normalizeUri(pathToFileURL(files[i]).href), rels[i]);
+        for (let i = 0; i < files.length; i++) uriToRel.set(toSpyglassUri(files[i]), rels[i]);
         const diagnosticsByRel = new Map<string, RawDiagnostic[]>();
         entry.uriToRel = uriToRel;
         entry.current = diagnosticsByRel;
@@ -304,7 +337,7 @@ export function createInProcEnginePool(): CheckEngine {
       const { datapack, version, file, line, column } = opts;
       const entry = await acquire(datapack, version, false);
       return enqueue(entry, async () => {
-        const nUri = core.normalizeUri(pathToFileURL(file).href);
+        const nUri = toSpyglassUri(file);
         const languageId = file.endsWith('.mcfunction') ? 'mcfunction' : 'json';
         await entry.service.project.onDidOpen(nUri, languageId, 1, opts.text ?? readFileSync(file, 'utf8'));
         const dand = await entry.service.project.ensureClientManagedChecked(nUri);
@@ -318,7 +351,7 @@ export function createInProcEnginePool(): CheckEngine {
       const { datapack, version, rel, text } = opts;
       const entry = await acquire(datapack, version, opts.noGotchas === true);
       return enqueue(entry, async () => {
-        const nUri = core.normalizeUri(pathToFileURL(join(datapack, 'data', rel)).href);
+        const nUri = toSpyglassUri(join(datapack, 'data', rel));
         const uriToRel = new Map([[nUri, rel]]);
         const diagnosticsByRel = new Map<string, RawDiagnostic[]>();
         entry.uriToRel = uriToRel;
@@ -346,7 +379,7 @@ export function createInProcEnginePool(): CheckEngine {
       // and re-bind stay serialized with any check() on the same entry.
       const entry = last;
       await enqueue(entry, async () => {
-        const nUri = core.normalizeUri(pathToFileURL(opts.file).href);
+        const nUri = toSpyglassUri(opts.file);
         const languageId = opts.file.endsWith('.mcfunction') ? 'mcfunction' : 'json';
         const next = (entry.docVersions.get(nUri) ?? 0) + 1;
         entry.docVersions.set(nUri, next);

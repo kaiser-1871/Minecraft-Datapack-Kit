@@ -401,6 +401,16 @@ function fieldVerdict(info: FieldInfo, version: string): Verdict {
   return 'valid';
 }
 
+/**
+ * Some vanilla-mcdoc annotations are degenerate: `since` and `until` are the same version, which
+ * would mean the field exists only in that single version. In practice these are schema artifacts
+ * (e.g. `Team` on many entity types is annotated as since=until=26.3 although it has existed for
+ * years). Treat them as unchecked instead of emitting a false positive.
+ */
+function isAmbiguousRange(info: FieldInfo): boolean {
+  return !!info.since && !!info.until && compareGameVersions(info.since, info.until) === 0;
+}
+
 /** Strip a trailing mcfunction `#` comment (quote-aware). */
 function stripLineComment(line: string): string {
   let q: string | null = null;
@@ -468,6 +478,12 @@ function classifyNbtRegistryValue(value: string, registry: string, regs: Registr
   if (tok.startsWith('#')) return 'skip';
   if (tok.includes('$(')) return 'skip';
   if (/^[{\[]/.test(tok)) return 'skip'; // not a scalar id (nested/array) — can't judge
+  // `DeathLootTable:"none"` / `"empty"` are long-standing sentinels Minecraft accepts for
+  // “no loot table”; they are not listed in the vanilla loot_table registry, so don't flag them.
+  if (registry === 'loot_table') {
+    if (tok === 'none' || tok === 'empty') return 'valid';
+    if (tok === '') return 'skip';
+  }
   const values = regs[registry];
   if (!values) return 'skip';
 
@@ -529,6 +545,10 @@ function scanSummon(line: string, start: number, lineNo: number, schema: EntityS
     }
     const info = fields.get(e.name);
     if (!info) { nbtUnresolved(out, 'unresolved due to unknown field', `field '${e.name}' is not in the cached entity schema for '${bare}'`, 1); continue; }
+    if (isAmbiguousRange(info)) {
+      nbtUnresolved(out, 'unresolved due to ambiguous schema annotation', `field '${e.name}' has since==until (${info.since}) in the cached schema`, 1);
+      continue;
+    }
     out.checked++;
     const v = fieldVerdict(info, version);
     if (v === 'removed') {

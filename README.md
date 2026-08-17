@@ -5,13 +5,25 @@
 [![CI](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/actions/workflows/ci.yml/badge.svg)](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/dpkit-mc)](https://www.npmjs.com/package/dpkit-mc)
 
-> **⚠️ Testing status**: the author has personally tested dpkit only against their own datapack
-> for **Minecraft 26.2**. Other versions (1.14 through the latest) are supported via the upstream
-> per-version engine data but have **not** been exhaustively verified by the author. Most features
-> — especially new version/feature updates — are assembled with heavy AI assistance and may
-> contain untested edge cases. **Please verify results yourself before relying on them in
-> production or CI.** Testing and feedback on other versions are very welcome! Please report
-> issues at the [issue tracker](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/issues).
+> **✅ Testing status (expanded)**: the author has personally tested dpkit against their own
+> **Minecraft 26.2** datapack, and against several older map datapacks that were already running
+> normally in-game:
+>
+> - **1.16.5** — a large CTM map datapack (~8.4k files). After fixing Windows paths containing `+`
+>   (which previously made the whole pack report as internal failures) and filtering entity-NBT /
+>   lenient-NBT / trailing-whitespace false positives, the check completes with 0 internal failures
+>   and a small, human-reviewable issue list.
+> - **1.21.1 / 1.21.4 / 1.21.6** — several Roguelike/PVE packs: 0 errors; remaining warnings are
+>   mostly cross-pack undeclared symbols (objectives/tags/sounds).
+> - **1.21.8 / 1.21.10 / 26.1.2** — several PVP packs: multiple packs are fully clean (0 errors,
+>   0 warnings); the rest only show cross-pack/mod-provided symbol warnings.
+>
+> Other versions (1.14 through the latest) are supported via upstream per-version engine data but
+> have **not** been exhaustively verified by the author. Most features — especially new
+> version/feature updates — are assembled with heavy AI assistance and may contain untested edge
+> cases. **Please verify results yourself before relying on them in production or CI.** Testing
+> and feedback on other versions are very welcome! Please report issues at the
+> [issue tracker](https://github.com/kaiser-1871/Minecraft-Datapack-Kit/issues).
 
 **dpkit** (short for **Minecraft Datapack Kit**) checks **any** Minecraft datapack against every
 game version the upstream data provider covers (**1.14 through the latest release/snapshot**),
@@ -215,9 +227,11 @@ Use `DPKIT_UPDATE_SNAPSHOTS=1` to refresh a snapshot baseline.
 `--workspace=<dir-or-zip>[,<dir-or-zip>...]` / `--additional-datapacks=…` make the checked pack
 see symbols declared by other datapacks **without checking those packs**. Resolution precedence:
 **current pack > workspace packs > vanilla**. Every resolved symbol is listed in the report as
-`resolved from workspace datapack <path> (symbol provider only, not checked)`. Without a workspace,
-a missing cross-pack function/advancement/predicate/… becomes a **scope hint** (not an
-error/warning): `Cannot find function animated_java:* — pass --workspace=… if another pack declares it`.
+`resolved from workspace datapack <path> (symbol provider only, not checked)`. Workspace providers
+cover functions, tags, advancements, loot tables, predicates, item modifiers, recipes, sound
+events, fonts, translations, **scoreboard objectives, teams, and structures**. Without a workspace,
+a missing cross-pack function/advancement/predicate/objective/team/structure/… becomes a
+**scope hint** (not an error/warning): `Cannot find function animated_java:* — pass --workspace=… if another pack declares it`.
 
 `--check-workspace` runs an additional full, separate check for every workspace datapack (still
 off by default; workspace packs remain provider-only in the main report).
@@ -423,20 +437,26 @@ server runs via `npm run mcp`.)
 
 Tools: `check_datapack`, `check_command`, `check_macro`, `lint_rules`, `write_report`,
 `diff_reports`, `query_syntax`, `complete_at`, `list_registry`, `list_versions`,
-`scan_gotchas`, `read_logs`, `get_vanilla_data`, `get_block_states`. `check_datapack` also returns
+`scan_gotchas`, `read_logs`, `wait_for_log`, `get_vanilla_data`, `get_block_states`,
+`get_pack_meta`. `check_datapack` also returns
 macro-line validation results and `coverage` (above); `check_command` validates one complete
-command string; `check_macro` expands `$` macro lines and validates each expanded command;
+command string and reports `cursor` / `parsedUpTo` on failure; `check_macro` expands `$` macro
+lines and validates each expanded command;
 `lint_rules` runs project-consistency rules (all off by default); `write_report` / `diff_reports`
 persist and compare report files; `list_registry` lists a registry's valid
-values in one call (check before writing an ID, especially inside `$` macro lines); `read_logs`
+values in one call with `search` / `offset` / `limit` paging (check before writing an ID,
+especially inside `$` macro lines); `read_logs`
 tails the active launcher's latest.log (official / Prism / TLauncher, including rotated `.log.gz`)
-to diagnose runtime issues; `get_vanilla_data` / `get_block_states` query the vanilla game's data
-files and block-state properties for a version (offline, from the shared cache).
+with a cursor (`since_id` / `nextId`) and reports `missed` when the buffer overflowed;
+`wait_for_log` blocks until a pattern appears instead of polling; `get_vanilla_data` /
+`get_block_states` query the vanilla game's data files and block-state properties for a version
+(offline, from the shared cache); `get_pack_meta` returns the exact `pack_format` / `data_pack_version`
+and a ready-to-paste `pack.mcmeta` for a version.
 `get_vanilla_data` currently catalogs 57 data categories, including 26.2 registries
 (`cat_variant`, `trade_set`, `test_instance`, …) and 26.3 worldgen split-outs
 (`worldgen/feature`, `worldgen/carver`, `worldgen/material_rule`, …). Default
 datapack/version come from `.dpkit.json` and `$DPKIT_DATAPACK` / `$DPKIT_VERSION`; tool arguments
-override per call. `.dpkit.json`'s `minecraftRoot` also feeds `read_logs` (a `minecraftRoot=` arg
+override per call. `.dpkit.json`'s `minecraftRoot` also feeds `read_logs` / `wait_for_log` (a `minecraftRoot=` arg
 overrides it).
 
 Every tool result is a JSON envelope: success adds `ok: true` (plus `count` / `total` where
@@ -450,7 +470,11 @@ Smoke test: `node tests/mcp-smoke.mjs` (runs on `tests/fixtures/pack`, reproduci
 
 Inspiration & data sources: the MCP additions (multi-launcher `read_logs`, vanilla-data lookup,
 block-state queries, the workflow prompt, and the envelope/truncation conventions) were inspired by
-the [MineCode MCP](https://github.com/AnCarsenat/minecode-mcp) project. The underlying data comes
+the [MineCode MCP](https://github.com/AnCarsenat/minecode-mcp) project. The cursor-based log
+design (`since_id` / `nextId` / `missed`), the blocking `wait_for_log` tool, the "honest result"
+command-failure fields (`cursor` / `parsedUpTo`), the pack-format helper (`get_pack_meta`), and
+the registry paging / block-state example hints were borrowed from
+[MCP-rogal](https://github.com/rogalKraft/mcp-rogal) by rogalKraft (CC0-1.0). The underlying data comes
 from the [misode/mcmeta](https://github.com/misode/mcmeta) summaries and the
 [Spyglass API](https://api.spyglassmc.com), fetched once and cached locally per dpkit's
 offline-first design — unlike MineCode, dpkit does not depend on live network calls at query time.
@@ -463,7 +487,8 @@ through the same six steps:
 
 1. **Pin the version first.** Read the datapack's `pack.mcmeta`, resolve the target version, and
    pass it to every tool call. Watch out for `min_format`/`max_format` skewing auto-detection —
-   pin `--version=` explicitly when it matters.
+   pin `--version=` explicitly when it matters. For a fresh pack, call `get_pack_meta(version)` to
+   get the exact `pack_format` and a ready-to-paste `pack.mcmeta`.
 2. **Check syntax before writing a command.** `query_syntax(path, version)` returns the real
    per-version grammar — never let the agent guess a subcommand or enum from memory (e.g. the 8
    valid values of `execute on`).
@@ -473,9 +498,11 @@ through the same six steps:
 4. **Re-check after every round of edits.** `check_datapack(datapack, version)` → fix all errors
    until the summary is clean; then `scan_gotchas` for silent-failure patterns (advancement
    damage nesting, particle map syntax, summon NBT casing).
-5. **Diagnose runtime issues with `read_logs`.** Tails the active launcher's `latest.log`
-   (official / Prism / TLauncher, incl. rotated `.log.gz`) — load errors that never surface in a
-   static check live here.
+5. **Diagnose runtime issues with `read_logs` / `wait_for_log`.** `read_logs` tails the active
+   launcher's `latest.log` (official / Prism / TLauncher, incl. rotated `.log.gz`) with a cursor;
+   after triggering a reload or command in-game, `wait_for_log(pattern=...)` blocks until the
+   matching line appears instead of polling. Load errors that never surface in a static check
+   live here.
 6. **Use vanilla data as reference.** `get_vanilla_data(category, search=)` for vanilla files
    (loot tables, recipes, worldgen), `get_block_states(block=)` for block-state properties — both
    offline from the shared cache.

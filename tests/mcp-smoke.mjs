@@ -65,7 +65,7 @@ async function call(name, args) {
   return { parsed, isErr };
 }
 
-const TOOLS = ['check_datapack', 'check_command', 'check_macro', 'lint_rules', 'write_report', 'diff_reports', 'query_syntax', 'complete_at', 'list_registry', 'list_versions', 'scan_gotchas', 'read_logs', 'get_block_states', 'get_vanilla_data'];
+const TOOLS = ['check_datapack', 'check_command', 'check_macro', 'lint_rules', 'write_report', 'diff_reports', 'query_syntax', 'complete_at', 'list_registry', 'list_versions', 'scan_gotchas', 'read_logs', 'wait_for_log', 'get_block_states', 'get_vanilla_data', 'get_pack_meta'];
 
 let logRoot;
 let macroRoot;
@@ -114,14 +114,16 @@ try {
       list_registry: { registry: 'mob_effect', version: TEST_VERSION },
       complete_at: { datapack: FIXTURE, file: 'test/function/gotcha.mcfunction', line: 1, column: 24, version: TEST_VERSION },
       check_datapack: { datapack: FIXTURE, version: TEST_VERSION },
-      check_command: { command: 'say hello', version: TEST_VERSION },
+      check_command: { command: 'say hello', version: TEST_VERSION, datapack: '' },
       check_macro: { macro: 'battle:archer/pierce_summon', version: TEST_VERSION, datapack: macroRoot, macro_args: { yaw: 0, pitch: 0 } },
       lint_rules: { datapack: FIXTURE, rules: [] },
       write_report: { report: { issues: [], summary: { errors: 0, warnings: 0 }, version: TEST_VERSION }, path: join(tmpdir(), 'dpkit-mcp-report.json') },
       diff_reports: { old: null, current: { issues: [] } },
       read_logs: { launcher: 'default', minecraftRoot: logRoot, lines: 5 },
+      wait_for_log: { pattern: 'smoke line', timeout_ms: 2000, launcher: 'default', minecraftRoot: logRoot },
       get_block_states: { version: TEST_VERSION },
       get_vanilla_data: { version: TEST_VERSION, category: 'loot_table', search: 'ancient_city' },
+      get_pack_meta: { version: TEST_VERSION },
     }[name];
     results[name] = await call(name, args);
   }
@@ -136,6 +138,11 @@ try {
     assert(r?.found === true, 'list_registry mob_effect → found');
     assert(Array.isArray(r?.values) && r.values.includes('speed'), 'list_registry values include "speed"');
     assert(r?.ok === true, 'list_registry returns the ok:true envelope');
+    const page = await call('list_registry', { registry: 'mob_effect', version: TEST_VERSION, offset: 0, limit: 1 });
+    const pr = page.parsed;
+    assert(pr?.values?.length === 1, 'list_registry limit=1 returns one value');
+    assert(typeof pr?.offset === 'number' && typeof pr?.total === 'number', 'list_registry returns offset and total');
+    assert(pr?.truncated === true && typeof pr?.nextOffset === 'number', 'list_registry reports nextOffset when more pages remain');
   }
   if (results.list_versions) {
     const r = results.list_versions.parsed;
@@ -159,6 +166,12 @@ try {
     const r = results.check_command.parsed;
     assert(r?.valid === true, 'check_command say hello → valid:true');
     assert(r?.ok === true, 'check_command returns the ok:true envelope');
+    const bad = await call('check_command', { command: 'setblock', version: TEST_VERSION, datapack: '' });
+    const br = bad.parsed;
+    assert(br?.valid === false, 'check_command missing args → valid:false');
+    assert(typeof br?.cursor === 'number' && br.cursor >= 0, 'check_command missing args → cursor position');
+    assert(typeof br?.parsedUpTo === 'string', 'check_command missing args → parsedUpTo string');
+    assert(typeof br?.hint === 'string' && br.hint.length > 0, 'check_command missing args → hint string');
   }
   if (results.check_macro) {
     const r = results.check_macro.parsed;
@@ -190,6 +203,10 @@ try {
     assert(first && typeof first.file === 'string' && typeof first.path === 'string' &&
       typeof first.size === 'number' && typeof first.linesShown === 'number' && typeof first.content === 'string',
       'read_logs log entries carry file/path/size/linesShown/content');
+    assert(typeof r?.nextId === 'number' && r.nextId > 0, 'read_logs returns nextId cursor');
+    assert(Array.isArray(r?.entries), 'read_logs returns cursor entries array');
+    assert(typeof r?.missed === 'number', 'read_logs returns missed counter');
+    assert(typeof r?.droppedTotal === 'number', 'read_logs returns droppedTotal counter');
     // failure branch: a minecraftRoot with no logs → success:false + error string (shape only).
     const emptyRoot = mkdtempSync(join(tmpdir(), 'dpkit-mcp-smoke-empty-'));
     const emptyRes = await call('read_logs', { launcher: 'default', minecraftRoot: emptyRoot });
@@ -198,11 +215,35 @@ try {
     assert(typeof er?.error === 'string' && er.error.length > 0, 'read_logs on an empty root → error string');
     rmSync(emptyRoot, { recursive: true, force: true });
   }
+  if (results.wait_for_log) {
+    const r = results.wait_for_log.parsed;
+    assert(r?.ok === true, 'wait_for_log returns the ok:true envelope');
+    assert(r?.matched === true, 'wait_for_log matches an already-buffered smoke line');
+    assert(r?.entry && typeof r.entry.message === 'string' && r.entry.message.includes('smoke line'),
+      'wait_for_log returns the matching entry');
+    assert(Array.isArray(r?.context), 'wait_for_log returns context around the match');
+  }
+  if (results.get_pack_meta) {
+    const r = results.get_pack_meta.parsed;
+    assert(r?.ok === true, 'get_pack_meta returns the ok:true envelope');
+    assert(typeof r?.data_pack_version === 'number' || r?.data_pack_version === null,
+      'get_pack_meta returns a data_pack_version (or null)');
+    assert(typeof r?.pack_format === 'number' || r?.pack_format === null,
+      'get_pack_meta returns pack_format');
+    assert(typeof r?.pack_mcmeta_example === 'string' && r.pack_mcmeta_example.includes('pack_format'),
+      'get_pack_meta returns a pack.mcmeta example with pack_format');
+  }
   if (results.get_block_states) {
     const r = results.get_block_states.parsed;
     assert(r && typeof r.ok === 'boolean', 'get_block_states returns an ok boolean');
     if (r?.ok === true) {
       assert(Array.isArray(r.blocks) && typeof r.total === 'number', 'get_block_states list → blocks array + total');
+      const single = await call('get_block_states', { version: TEST_VERSION, block: 'stone' });
+      const sr = single.parsed;
+      if (sr?.ok === true && sr?.found === true) {
+        assert(typeof sr.example === 'string' && sr.example.startsWith('setblock ~ ~ ~ stone'),
+          'get_block_states single block returns a setblock example');
+      }
     } else {
       assert(typeof r?.error === 'string' && r.error.length > 0, 'get_block_states uncached → structured error');
     }

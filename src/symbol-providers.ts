@@ -21,6 +21,9 @@ export interface PackSymbols {
   soundEvents: Set<string>;
   fonts: Set<string>;
   translations: Set<string>;
+  objectives: Set<string>;
+  teams: Set<string>;
+  structures: Set<string>;
 }
 
 export type AuxKind = 'current' | 'workspace' | 'resource-pack';
@@ -47,6 +50,9 @@ export function emptySymbols(): PackSymbols {
     soundEvents: new Set(),
     fonts: new Set(),
     translations: new Set(),
+    objectives: new Set(),
+    teams: new Set(),
+    structures: new Set(),
   };
 }
 
@@ -88,6 +94,19 @@ export function scanPackSymbols(root: string, includeData: boolean): PackSymbols
 
         if (kind === 'function' && rel.endsWith('.mcfunction')) {
           symbols.functions.add(`${ns}:${rest.slice(0, -'.mcfunction'.length)}`);
+          // Scoreboard objectives and teams are declared in functions, not as data files.
+          // They are first-class symbols in commands, so workspace providers must know them too.
+          try {
+            const text = readFileSync(_file, 'utf8');
+            for (const m of text.matchAll(/\bscoreboard\s+objectives\s+add\s+([A-Za-z0-9_.+\-]+)/g)) {
+              symbols.objectives.add(m[1]);
+            }
+            for (const m of text.matchAll(/\bteam\s+add\s+([A-Za-z0-9_.+\-]+)/g)) {
+              symbols.teams.add(m[1]);
+            }
+          } catch { /* read-only provider: unreadable files simply contribute no symbols */ }
+        } else if (kind === 'structures' && rel.endsWith('.nbt')) {
+          symbols.structures.add(`${ns}:${rest.slice(0, -'.nbt'.length)}`);
         } else if (kind === 'tags' && rest.endsWith('.json')) {
           const registry = segs[2];
           const id = segs.slice(3).join('/').slice(0, -'.json'.length);
@@ -205,6 +224,9 @@ export function resolveAuxSymbol(msg: string, providers: AuxPack[]): ResolvedAux
         case 'item_modifier': hit = setHas(s.itemModifiers); break;
         case 'recipe': hit = setHas(s.recipes); break;
         case 'sound_event': hit = setHas(s.soundEvents); break;
+        case 'objective': hit = setHas(s.objectives); break;
+        case 'team': hit = setHas(s.teams); break;
+        case 'structure': hit = setHas(s.structures); break;
         case 'font': hit = setHas(s.fonts); break;
         case 'translate':
         case 'translation':

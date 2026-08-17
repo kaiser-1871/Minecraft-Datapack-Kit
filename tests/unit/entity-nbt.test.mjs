@@ -119,3 +119,26 @@ test('registry missing from dpkit data is checked-but-skipped, never warned (Mot
   assert.equal(r.issues.length, 0);
   assert.equal(r.checked, 1);
 });
+
+test('ambiguous since==until schema annotations are unchecked, never warned (Team in 1.16.5)', () => {
+  // The cached mcdoc annotates Team on many entities as since=until=26.3, which is a schema
+  // artifact: Team has existed for years and these packs run fine on 1.16.x.
+  const r = scan('summon minecraft:tropical_fish ~ ~ ~ {Team:"red"}\n', '1.16.5');
+  assert.equal(r.issues.length, 0);
+  assert.equal(r.unchecked, 1);
+  const r2 = scan('summon minecraft:armor_stand ~ ~ ~ {Team:"red"}\n', '1.16.5');
+  assert.equal(r2.issues.length, 0);
+  assert.equal(r2.unchecked, 1);
+});
+
+test('bare loot-table sentinels "none" and "empty" are not flagged', () => {
+  const r = scan('summon minecraft:zombie ~ ~ ~ {DeathLootTable:"none"}\n', '1.16.5');
+  assert.equal(r.issues.length, 0);
+  assert.equal(r.checked, 1);
+  const r2 = scan('summon minecraft:zombie ~ ~ ~ {DeathLootTable:"empty"}\n', '1.16.5');
+  assert.equal(r2.issues.length, 0);
+  assert.equal(r2.checked, 1);
+  // An empty string is also a sentinel-like value we cannot authoritatively reject.
+  const r3 = scan('summon minecraft:zombie ~ ~ ~ {DeathLootTable:""}\n', '1.16.5');
+  assert.equal(r3.issues.length, 0);
+});
